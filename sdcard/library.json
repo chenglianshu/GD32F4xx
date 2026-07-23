@@ -1,0 +1,11 @@
+{
+    "name": "sdcard",
+    "version": "1.0.0",
+    "description": "grblHAL SD card plugin with FatFs support",
+    "build": {
+        "srcFilter": [
+            "+<*.c>",
+            "-<bt_ble.c>"
+        ]
+    }
+}

@@ -1,0 +1,16 @@
+[submodule "grbl"]
+	path = grbl
+	url = https://github.com/grblhal/core
+[submodule "laser"]
+	path = laser
+	url = https://github.com/grblHAL/Plugins_laser
+[submodule "spindle"]
+	path = laser
+	url = https://github.com/grblHAL/Plugins_spindle		
+[submodule "eeprom"]
+	path = laser
+	url = https://github.com/grblHAL/Plugin_EEPROM
+[submodule "sdcard"]
+	path = laser
+	url = https://github.com/grblHAL/Plugin_SD_card	
+

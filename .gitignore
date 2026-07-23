@@ -1,0 +1,11 @@
+.pio/
+.pioenvs/
+.piolibdeps/
+.vscode/
+*.elf
+*.bin
+*.hex
+*.map
+*.lst
+.DS_Store
+Thumbs.db
