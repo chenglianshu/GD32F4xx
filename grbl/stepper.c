@@ -36,8 +36,6 @@
 //! \cond
 
 // Some useful constants.
-// DT_SEGMENT: 每个运动段的持续时间（分钟），由加速度采样率决定
-// 例如：ACCELERATION_TICKS_PER_SECOND=200 时，DT_SEGMENT = 1/(200*60) = 0.0000833分钟
 #define DT_SEGMENT (1.0f / (ACCELERATION_TICKS_PER_SECOND * 60.0f)) // min/segment
 #define REQ_MM_INCREMENT_SCALAR 1.25f
 
@@ -60,25 +58,18 @@ static bool stepping = false;
 // NOTE: This data is copied from the prepped planner blocks so that the planner blocks may be
 // discarded when entirely consumed and completed by the segment buffer. Also, AMASS alters this
 // data for its own use.
-// 【步进电机块缓冲区】存储从规划器块复制的Bresenham算法执行数据
 DCRAM static st_block_t st_block_buffer[SEGMENT_BUFFER_SIZE - 1];
 
 // Primary stepper segment ring buffer. Contains small, short line segments for the stepper
 // algorithm to execute, which are "checked-out" incrementally from the first block in the
 // planner buffer. Once "checked-out", the steps in the segments buffer cannot be modified by
 // the planner, where the remaining planner block steps still can.
-// 【段环形缓冲区】存储短小的线段数据，由定时器中断逐段取出执行
 DCRAM static segment_t segment_buffer[SEGMENT_BUFFER_SIZE];
 
 // Stepper ISR data struct. Contains the running data for the main stepper ISR.
-// 【步进电机ISR运行时数据】包含当前步进方向、步数、位置等实时信息
 static stepper_t st = {};
 
 #if ADAPTIVE_MULTI_AXIS_STEP_SMOOTHING
-// 【AMASS - 自适应多轴步进平滑】
-// AMASS通过在不同频率段使用不同的时间基准来平滑低频步进，
-// 减少多轴运动时的混叠噪声和机械振动。
-// level_1/2/3 对应不同的步进频率阈值
 typedef struct {
     uint32_t level_1;
     uint32_t level_2;

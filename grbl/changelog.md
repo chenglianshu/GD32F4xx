@@ -1,8 +1,191 @@
 ## grblHAL changelog
 
-<a name="20260518">20260518
+<a name="20260719">Build 20260719
+
+Core:
+
+* Updated VFS to correctly handle long working directory paths that would otherwise lead to buffer overflows. Ref. PR#986 which is a partial fix.
+> [!NOTE]
+> The underlying file systems may impose their own limits to path lengths.
+
+
+* Updated named O calls to allow name lengths only limited by available heap. Ref. PR#989 which likely would return an error on overly long names and would potentially execute incorrect code if not.
+
+Plugins:
+
+* Networking, ftp: updated to correctly handle long working directory paths. Allow access to file systems not mounted as root when no real root file system mounted.
+
+* SD card, littlefs: updated to correctly handle long working directory paths.
+
+---
+
+<a name="20260718">Build 20260718
+
+Core:
+
+* Changes to VFS API signatures to aid improved handling of file system formatting.
+
+* Now turns off spindle\(s\) on spindle related settings changes.
 
 Drivers:
+
+* ESP32, PiBot Ultra board: force stream assignments for modbus and MPG.
+
+* iMXRT1062: fixed typo preventing use of serial port 0 in some configurations.
+
+Plugins:
+
+* SD card, networking, WebUI: updated for VFS API changes, improved formatting of SD card \(FatFs\) and littlefs.
+
+* EEPROM: added support for 1Mbit EEPROMS, improved littlefs EEPROM low-level driver.
+
+* Keypad, display interface: fix for missing probe state report.
+
+---
+
+<a name="20260709">Build 20260709
+
+Core:
+
+* Added support for MPG real time command character stream switching for RX only streams.
+
+Drivers:
+
+* RP2040: added support for optional third PIO based UART port. Added tentative map for Bolangsk board.
+
+---
+
+<a name="20260626">20260626
+
+Core:
+
+* Fix for asymmetric axis kinematics triggering soft limits when enabled.
+
+---
+
+<a name="20260622">Build 20260622
+
+Core:
+
+* PR#974 applied.
+
+* Added preprocessor logic for handling potentially bad spindle definitions.
+
+Plugins:
+
+* Spindle: added preprocessor validation of default spindle settings.
+
+---
+
+<a name="20260619">Build 20260619
+
+Core:
+
+* Made named O-call LinuxCNC compliant by changing name to lowercase.
+
+* Fix for parking motion using `$32` laser mode setting when it should use the current spindle mode.
+
+* For developers: changed signature of `hal.stream.on_linestate_changed()` to include stream properties.
+Currently the event only fires for native USB connections and it will now fire even if the current stream is not USB based.
+
+Drivers:
+
+* LPC176x, RP2040, STM32F1xx, STM32F3xx, STM32F4xx and STM32F7xx: updated for `hal.stream.on_linestate_changed()` signature change.
+> [!NOTE]
+> Other drivers that support native USB currently does not fire this event.
+
+* STM32F7xx: fixed typo that got committed. Ref. issue [#29](https://github.com/grblHAL/STM32F7xx/issues/29).
+
+Plugins:
+
+* SD card, macros: moved default values for `$675` - _Macro ATC Options_ to core.
+
+* SD card, stream: "hardened" code a bit.
+
+---
+
+<a name="20260618">Build 20260618
+
+Core:
+
+* Added kinematics for asymmetric \(differing step/mm\) ganged or auto squared axis, claims the highest number axis > Z for the second motor.
+
+* Ignore single block mode while executing startup code. Ref. issue [#963](https://github.com/grblHAL/core/issues/963).
+
+* For developers: added API call, `system_claim_axis()`, for claiming highest numbered axis > Z, hides its related settings.
+
+* Fixed a typo causing ganged Z compilation failure.
+
+* Fixed code guard. Ref. discussion [#968](https://github.com/grblHAL/core/discussions/968).
+
+Plugins:
+
+* Misc, MCP23017: added plugin for [MCP23017](https://ww1.microchip.com/downloads/en/devicedoc/20001952c.pdf) 16 channel I2C I/O expander,
+compile time configurable for 8 channel input and output, 16 channel input or 16 channel output.
+
+Drivers:
+
+* RP2040: "hardened" neopixel code.
+
+* IMXRT1062: fixed typo causing compilation to fail if axis is remapped as C. Fixed incorrect function decorators in the core. Ref. issue #[965](https://github.com/grblHAL/core/issues/965).
+
+* STM32F7xx: fixed copy paste error affecting handling of AUX IRQ for pins 10 - 15.
+
+---
+
+<a name="20260602">Build 20260602
+
+Core:
+
+* Fix for regression affecting step injection code.
+
+Drivers:
+
+* ESP32: some fixes for ethernet to make it usable.
+
+---
+
+<a name="20260528">20260528
+
+Core:
+
+* Minor change to shut up some compilers incorrectly warning about a potentially uninitialized variable. Ref. issue [#959](https://github.com/grblHAL/core/issues/959).
+
+Plugins:
+
+* EEPROM: increased the write delay somewhat to avoid hangs. Ref. issue [#2](https://github.com/grblHAL/Plugin_EEPROM/issues/2).
+
+---
+
+<a name="20260525">Build 20260525
+
+Core:
+
+* Allow full circle arcs without axis words. Ref. issue [#958](https://github.com/grblHAL/core/issues/958).
+
+Drivers:
+
+* RP2040: added pin definition for THCAD2 input to the RP23U5XBB board. It maps to the RX input of the serial 1 port.
+
+* STM32F4xx: fixed regression in Triniamic SPI code.
+
+---
+
+<a name="20260520">20260520
+
+Core:
+
+* Fixed typos that may affect STM32 drivers assignment priority of interrupt capable pins.
+
+Drivers:
+
+* ESP32: updated code for BlackBox X32 to match current core.
+
+---
+
+<a name="20260518">Build 20260518
+
+Core:
 
 * Reworked feed mode handling (G93-G95), now keeps current feed rate over spindle synced motion. Ref. issue [#954](https://github.com/grblHAL/core/issues/954).
 

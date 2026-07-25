@@ -49,6 +49,7 @@ extern void ymodem_init (void);
 #endif
 
 #define MAX_PATHLEN 128
+#define MAX_TYPELEN 5
 
 static char const *const filetypes[] = {
     "nc",
@@ -118,7 +119,7 @@ static void onProgramCompleted (program_flow_t program_flow, bool check_mode);
 
 static file_status_t filename_valid (char *filename)
 {
-    return strlen(filename) > 40 || strchr(filename, CMD_STATUS_REPORT) || strchr(filename, CMD_CYCLE_START) || strchr(filename, CMD_FEED_HOLD)
+    return strlen(filename) > 40 || strchr(filename, CMD_STATUS_REPORT_LEGACY) || strchr(filename, CMD_CYCLE_START_LEGACY) || strchr(filename, CMD_FEED_HOLD_LEGACY)
             ? Filename_Invalid
             : Filename_Valid;
 }
@@ -126,12 +127,12 @@ static file_status_t filename_valid (char *filename)
 static file_status_t allowed (char *filename, bool is_file)
 {
     uint_fast8_t idx = 0;
-    char filetype[8], *ftptr;
+    char filetype[MAX_TYPELEN + 1], *ftptr;
     file_status_t status = is_file ? Filename_Filtered : Filename_Valid;
 
     if(is_file && (ftptr = strrchr(filename, '.'))) {
         ftptr++;
-        if(strlen(ftptr) > sizeof(filetype) - 1)
+        if(strlen(ftptr) > MAX_TYPELEN)
             return status;
         while(ftptr[idx]) {
             filetype[idx] = LCAPS(ftptr[idx]);
@@ -139,10 +140,9 @@ static file_status_t allowed (char *filename, bool is_file)
         }
         filetype[idx] = '\0';
         idx = 0;
-        while(status == Filename_Filtered && filetypes[idx][0]) {
-            if(!strcmp(filetype, filetypes[idx]))
+        while(status == Filename_Filtered && *filetypes[idx]) {
+            if(!strcmp(filetype, filetypes[idx++]))
                 status = Filename_Valid;
-            idx++;
         }
     }
 
@@ -683,6 +683,9 @@ FLASHMEM static status_code_t cmd_to_output (sys_state_t state, char *args)
                     }
                 }
 
+                if(!file.eol)
+                    hal.stream.write(ASCII_EOL);
+
                 file_close();
                 retval = Status_OK;
             } else
@@ -737,10 +740,7 @@ FLASHMEM static status_code_t cmd_format (sys_state_t state, char *args)
         while((drive = vfs_drives_read(dh, true))) {
             if(!strcasecmp(args, *args == '/' ? drive->path : drive->name)) {
                 report_message("Formatting...", Message_Info);
-                if(vfs_drive_format(drive) == 0)
-                    status = !strcmp(drive->name, "FatFs") ? system_execute_line("$FM") : Status_OK;
-                else
-                    status = Status_FsFormatFailed;
+                status = vfs_drive_format(drive) == 0 ? Status_OK : Status_FsFormatFailed;
                 report_message("", Message_Plain);
                 break;
             }
@@ -847,7 +847,7 @@ FLASHMEM static void onReportOptions (bool newopt)
         hal.stream.write(",FS");
 #endif
     } else
-        report_plugin("FS stream", "1.11");
+        report_plugin("FS stream", "1.13");
 
 }
 

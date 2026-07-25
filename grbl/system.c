@@ -33,6 +33,8 @@
 #include "kinematics.h"
 #endif
 
+static uint8_t n_axis = N_AXIS;
+
 /*! \internal \brief Simple hypotenuse computation function.
 \param x length
 \param y height
@@ -41,6 +43,27 @@
 inline static float hypot_f (float x, float y)
 {
     return sqrtf(x * x + y * y);
+}
+
+FLASHMEM uint8_t system_claim_axis (void)
+{
+    return n_axis > 3 ? n_axis-- : 0;
+}
+
+uint8_t system_n_axis (void)
+{
+    return n_axis;
+}
+
+FLASHMEM uint8_t system_axis_mask (void)
+{
+    uint8_t axis_mask = 0;
+    uint_fast32_t idx = n_axis;
+
+    while(idx--)
+        axis_mask = (axis_mask << 1) | 1;
+
+    return axis_mask;
 }
 
 void system_init_switches (void)
@@ -58,17 +81,6 @@ its ready. This works exactly like the character-based realtime commands when pi
 directly from the incoming data stream.
 \param signals a \a control_signals_t union holding status of the signals.
 */
-/*
- * 【控制信号中断处理函数】
- * 当硬件引脚电平变化时触发（如急停按钮、安全门、循环启动等）。
- * 此函数运行在中断上下文中(ISR_CODE)，因此必须快速执行。
- *
- * 处理逻辑：
- *   1. 信号去断言（deasserted）处理：检测上升沿/下降沿
- *   2. 关键信号（急停/复位/电机故障）：立即执行mc_reset()
- *   3. 安全门信号：触发停车/保持流程
- *   4. 其他控制信号：设置标志位，由主循环处理
- */
 ISR_CODE void ISR_FUNC(control_interrupt_handler)(control_signals_t signals)
 {
     static const control_signals_t onoff_signals = {
@@ -110,7 +122,7 @@ ISR_CODE void ISR_FUNC(control_interrupt_handler)(control_signals_t signals)
                     // NOTE: at least for lasers there should be an external interlock blocking laser power.
                     if(state_get() != STATE_IDLE && state_get() != STATE_JOG)
                         system_set_exec_state_flag(EXEC_SAFETY_DOOR);
-                    if(settings.mode == Mode_Laser) // Turn off spindle immediately (laser) when in laser mode
+                    if(gc_spindle_get(0)->hal->cap.laser) // Turn off spindle immediately (laser) when in laser mode
                         spindle_all_off(true);
                 } else
                     system_set_exec_state_flag(EXEC_SAFETY_DOOR);
@@ -176,6 +188,8 @@ FLASHMEM void system_execute_startup (void *data)
 
         uint_fast8_t idx;
         char line[sizeof(stored_line_t)];
+        bool single_block = sys.flags.single_block;
+        sys.flags.single_block = Off; // Disable single block mode when executing startup code.
 
         for(idx = 0; idx < N_STARTUP_LINE; idx++) {
             if(!settings_read_startup_line(idx, line))
@@ -187,6 +201,8 @@ FLASHMEM void system_execute_startup (void *data)
                 } while((block = strtok(NULL, "|")));
             }
         }
+
+        sys.flags.single_block = single_block;
     }
 }
 

@@ -39,23 +39,19 @@
 void mc_sync_backlash_position (void);
 #endif
 
-// 【规划器块缓冲区】
-// 环形缓冲区结构，存储待执行的运动指令块
-// 每个块包含：目标位置、进给速度、加速度参数、方向等信息
-// 数据流向：gcode解析 → motion_control → planner缓冲 → stepper执行
 typedef struct {
-    uint_fast16_t size;         // 缓冲区大小减1（环形缓冲区容量）
-    plan_block_t *blocks;       // 运动指令环形缓冲区
-    plan_block_t *tail;         // 当前正在处理的块指针
-    plan_block_t *head;         // 下一个要压入的块指针
-    plan_block_t *next_head;    // 下一个缓冲区头部指针
-    plan_block_t *planned;      // 最优规划块指针（用于前瞻优化）
+    uint_fast16_t size;         // Number of blocks in the planner buffer minus 1
+    plan_block_t *blocks;       // A ring buffer for motion instructions
+    plan_block_t *tail;         // Pointer to the block to process now
+    plan_block_t *head;         // Pointer to the next block to be pushed
+    plan_block_t *next_head;    // Pointer to the next buffer head
+    plan_block_t *planned;      // Pointer to the optimally planned block
 } block_buffer_t;
 
 static planner_t pl;
 static block_buffer_t block_buffer;
 
-/*                            【规划器速度定义 - 梯形速度曲线】
+/*                            PLANNER SPEED DEFINITION
                                      +--------+   <- current->nominal_speed
                                     /          \
          current->entry_speed ->   +            \

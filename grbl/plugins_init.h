@@ -253,6 +253,21 @@
   keyway_init();
 #endif
 
+#if PNEUMASEAL_ENABLE
+    extern void pneumaseal_init (void);
+    pneumaseal_init();
+#endif
+
+#if THERMISTOR_ENABLE
+    extern void thermistor_init (void);
+    thermistor_init();
+#endif
+
+#if SPINDLE_INTERLOCK_ENABLE
+    extern void spindle_interlock_init (void);
+    spindle_interlock_init();
+#endif
+
 // End third party plugin definitions.
 
 #if ODOMETER_ENABLE

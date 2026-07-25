@@ -78,21 +78,6 @@ void mc_sync_backlash_position (void)
 // NOTE: This is the primary gateway to the grblHAL planner. All line motions, including arc line
 // segments, must pass through this routine before being passed to the planner. The separation of
 // mc_line and plan_buffer_line is done primarily to place non-planner-type functions from being
-// 【mc_line - 运动控制主入口】
-// 这是grblHAL运动系统的核心网关函数。所有直线运动（包括圆弧展开后的线段）
-// 都必须通过此函数才能进入规划器(planner)。
-//
-// 处理流程：
-//   1. 检查系统状态（是否允许运动）
-//   2. 运动学变换（如CoreXY坐标转换）
-//   3. 反向间隙补偿（如果启用）
-//   4. 软限位检查
-//   5. 调用plan_buffer_line()将运动块加入规划器缓冲区
-//
-// 参数：
-//   target[] - 目标绝对坐标（毫米）
-//   feed_rate - 进给速度（mm/s，或时间倒数模式）
-//   invert_feed_rate - 为true时feed_rate表示运动时间 = 1分钟/feed_rate
 // in the planner and to let backlash compensation or canned cycle integration simple and direct.
 bool mc_line (float *target, plan_line_data_t *pl_data)
 {

@@ -41,35 +41,10 @@
 #include "rgb.h"
 #include "plugins.h"
 
-/*
- * 【HAL - 硬件抽象层】版本10
- *
- * 这是grblHAL架构的核心：定义了一套完整的函数指针接口，
- * 将核心逻辑（G代码解析、运动规划等）与具体硬件完全解耦。
- *
- * 架构分层：
- *   ┌─────────────────────────┐
- *   │    G代码解析 (gcode.c)    │  ← 应用层：解析G代码命令
- *   ├─────────────────────────┤
- *   │   运动控制 (motion_ctrl)  │  ← 中间层：直线/圆弧插补
- *   ├─────────────────────────┤
- *   │    规划器 (planner.c)     │  ← 规划层：速度曲线优化
- *   ├─────────────────────────┤
- *   │   步进电机 (stepper.c)    │  ← 驱动层：脉冲生成
- *   ├─────────────────────────┤
- *   │    HAL (hal.h)          │  ← 抽象层：函数指针接口
- *   ├─────────────────────────┤
- *   │   驱动 (driver.c)        │  ← 硬件层：STM32具体实现
- *   └─────────────────────────┘
- *
- * HAL通过函数指针（如 hal.steer.wake_up, hal.spindle.set_state 等）
- * 允许不同平台只需实现这些函数即可移植grblHAL。
- */
 #define HAL_VERSION 10
 
-// 【驱动能力标志位】
-// 由底层驱动在driver_init()中设置，告知核心层该硬件支持哪些功能
-// 标志位可通过插件清除以禁用某些能力
+// Bitmap flags for driver capabilities, to be set by driver in driver_init() or plugins,
+// flags may be cleared by plugins or the core to switch off capabilities.
 typedef union {
     uint32_t value; //!< All bitmap flags.
     struct {

@@ -59,10 +59,6 @@
 // mutually exclusive, or cannot exist on the same line, because they each toggle a state or execute
 // a unique motion. These are defined in the NIST RS274-NGC v3 g-code standard, available online,
 // and are similar/identical to other g-code interpreters by manufacturers (Haas,Fanuc,Mazak,etc).
-// 【G代码模态组定义】
-// 模态组是互斥的G代码命令组，同一行中同一组只能出现一个命令。
-// 例如：G0(快速移动)和G1(直线插补)属于同一个模态组(Motion)，不能同时存在。
-// 这种设计符合NIST RS274-NGC v3标准。
 typedef union {
     uint32_t mask;
     struct {
@@ -136,6 +132,7 @@ DCRAM parser_state_t gc_state;
 m98_macro_t *m98_macros = NULL;
 static tool_data_t *pending_tool = NULL;
 static output_command_t *output_commands = NULL; // Linked list
+static settings_changed_ptr settings_changed = NULL;
 static scale_factor_t scale_factor = {
     .ijk[X_AXIS] = 1.0f,
     .ijk[Y_AXIS] = 1.0f,
@@ -751,6 +748,14 @@ static status_code_t gc_at_exit (status_code_t status)
     return status;
 }
 
+static void onSettingsChanged (settings_t *settings, settings_changed_flags_t changed)
+{
+    if(changed.spindle || changed.restore_defaults)
+        gc_spindle_off();
+
+    settings_changed(settings, changed);
+}
+
 FLASHMEM void gc_init (bool stop)
 {
 #if COMPATIBILITY_LEVEL > 1
@@ -791,6 +796,11 @@ FLASHMEM void gc_init (bool stop)
         }
     }
 #endif
+
+    if(settings_changed == NULL) {
+        settings_changed = grbl.on_settings_changed;
+        grbl.on_settings_changed = onSettingsChanged;
+    }
 
     // Clear any pending output commands etc...
     gc_at_exit(Status_UserException);
@@ -874,6 +884,7 @@ FLASHMEM void gc_spindle_off (void)
     spindle_all_off(false);
     report_add_realtime(Report_Spindle);
 }
+
 
 FLASHMEM void gc_coolant (coolant_state_t state)
 {
@@ -3055,9 +3066,10 @@ status_code_t gc_execute_block (char *block)
             if((axis_words.mask || gc_block.modal.motion == MotionMode_CwArc || gc_block.modal.motion == MotionMode_CcwArc) && axis_command != AxisCommand_ToolLengthOffset) { // TLO block any axis command.
 
 #ifdef ROTATION_ENABLE
-                axes_signals_t r_axes, r_around;
-                uint_fast8_t idx_0, idx_1;
-                if(!gc_parser_flags.jog_motion && (r_axes.mask = (gc_block.modal.g5x_offset.data.rotation == 0.0f ? 0 : (axis_words.mask & (r_around.mask = rotate_axes[gc_block.modal.plane_select].mask))))) {
+                axes_signals_t r_axes = {0}, r_around;
+                uint_fast8_t idx_0 = 0, idx_1 = 0;
+
+                if(!(gc_parser_flags.jog_motion || gc_block.non_modal_command == NonModal_AbsoluteOverride) && (r_axes.mask = (gc_block.modal.g5x_offset.data.rotation == 0.0f ? 0 : (axis_words.mask & (r_around.mask = rotate_axes[gc_block.modal.plane_select].mask))))) {
 
                     if(r_axes.mask != r_around.mask) {
                         point_3d_t pos;
@@ -3071,7 +3083,7 @@ status_code_t gc_execute_block (char *block)
                         axis_words.mask |= r_around.mask;
                     } else {
                         idx_0 = ffs(r_around.mask) - 1;
-                        bit_false(r_around.mask, bit(idx));
+                        bit_false(r_around.mask, bit(idx_0));
                         idx_1 = ffs(r_around.mask) - 1;
                     }
 
@@ -3416,18 +3428,20 @@ status_code_t gc_execute_block (char *block)
                 case MotionMode_CcwArc:
                     // [G2/3 Errors All-Modes]: Feed rate undefined.
                     // [G2/3 Radius-Mode Errors]: No axis words in selected plane. Target point is same as current.
-                    // [G2/3 Offset-Mode Errors]: No axis words and/or offsets in selected plane. The radius to the current
+                    // [G2/3 Offset-Mode Errors]: No axis offsets in selected plane. The radius to the current
                     //   point and the radius to the target point differs more than 0.002mm (EMC def. 0.5mm OR 0.005mm and 0.1% radius).
-                    // [G2/3 Full-Circle-Mode Errors]: Axis words exist. No offsets programmed. P must be an integer.
+                    // [G2/3 Full-Circle-Mode Errors]: No offsets programmed. P must be an integer.
                     // NOTE: Both radius and offsets are required for arc tracing and are pre-computed with the error-checking.
 
-                    if (!axis_words.mask)
-                        RETURN(Status_GcodeNoAxisWords); // [No axis words]
+                    if(gc_block.words.r) { // Arc Radius Mode
+                        if(!axis_words.mask)
+                            RETURN(Status_GcodeNoAxisWords); // [No axis words]
 
-                    if (!(axis_words.mask & (bit(plane.axis_0)|bit(plane.axis_1))))
-                        RETURN(Status_GcodeNoAxisWordsInPlane); // [No axis words in plane]
+                        if(!(axis_words.mask & (bit(plane.axis_0)|bit(plane.axis_1))))
+                            RETURN(Status_GcodeNoAxisWordsInPlane); // [No axis words in plane]
+                    }
 
-                    if (gc_block.words.p) { // Number of turns
+                    if(gc_block.words.p) { // Number of turns
                         if(!isintf(gc_block.values.p))
                             RETURN(Status_GcodeCommandValueNotInteger); // [P word is not an integer]
                         gc_block.arc_turns = (uint32_t)truncf(gc_block.values.p);
@@ -3445,7 +3459,7 @@ status_code_t gc_execute_block (char *block)
                     if(gc_state.modal.scaling_active && scale_factor.ijk[plane.axis_0] * scale_factor.ijk[plane.axis_1] < 0.0f)
                         gc_parser_flags.arc_is_clockwise = !gc_parser_flags.arc_is_clockwise;
 
-                    if (gc_block.words.r) { // Arc Radius Mode
+                    if(gc_block.words.r) { // Arc Radius Mode
 
                         gc_block.words.r = Off;
 
@@ -3895,7 +3909,7 @@ status_code_t gc_execute_block (char *block)
 
         if(!check_mode) {
 
-			bool set_current;
+            bool set_current;
             tool_data_t *tool = tool_get_pending(gc_state.tool_pending, NULL);
 
             // If M6 not available or M61 commanded set new tool immediately
@@ -4538,7 +4552,7 @@ status_code_t gc_execute_block (char *block)
                 {
                     // NOTE: gc_block.values.xyz is returned from mc_probe_cycle with the updated position value. So
                     // upon a successful probing cycle, the machine position and the returned value should be the same.
-                    probe_id_t probe_id;
+                    probe_id_t probe_id = Probe_Default; // initialized to shut up compiler warning
                     plan_data.condition.no_feed_override = !settings.probe.allow_feed_override;
                     if(gc_block.select_probe){
                         if((gc_block.select_probe = (probe_id_t)gc_block.values.p != (probe_id = hal.probe.get_state().probe_id))) {
