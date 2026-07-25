@@ -15,31 +15,117 @@
 
 #include <string.h>
 
-// PWM pin table for CNC_ED1 V1.1
-// Primary spindle/laser PWM on TIMER0 CH2 (PA10).
+// Helper macros to generate PWM signal table entries for GD32F4xx.
+// Channel mapping: STM32 CC1/CC2/CC3/CC4 -> GD32 CH0/CH1/CH2/CH3.
+#define _pwm_ccr(t, c)        &TIMER_CH##c##CV(t)
+#define _pwm_ccmr_ch01(t)     &TIMER_CHCTL0(t)
+#define _pwm_ccmr_ch23(t)     &TIMER_CHCTL1(t)
+#define _pwm_ois_ch0          TIMER_CTL1_ISO0
+#define _pwm_ois_ch1          TIMER_CTL1_ISO1
+#define _pwm_ois_ch2          TIMER_CTL1_ISO2
+#define _pwm_ois_ch3          TIMER_CTL1_ISO3
+#define _pwm_en_ch0           TIMER_CHCTL2_CH0EN
+#define _pwm_en_ch1           TIMER_CHCTL2_CH1EN
+#define _pwm_en_ch2           TIMER_CHCTL2_CH2EN
+#define _pwm_en_ch3           TIMER_CHCTL2_CH3EN
+#define _pwm_pol_ch0          TIMER_CHCTL2_CH0P
+#define _pwm_pol_ch1          TIMER_CHCTL2_CH1P
+#define _pwm_pol_ch2          TIMER_CHCTL2_CH2P
+#define _pwm_pol_ch3          TIMER_CHCTL2_CH3P
+#define _pwm_ocm_ch0          TIMER_OC_MODE_PWM0
+#define _pwm_ocm_ch1          (TIMER_OC_MODE_PWM0 << 8)
+#define _pwm_ocm_ch2          TIMER_OC_MODE_PWM0
+#define _pwm_ocm_ch3          (TIMER_OC_MODE_PWM0 << 8)
+#define _pwm_ocmc_ch0         (TIMER_CHCTL0_CH0COMCTL | TIMER_CHCTL0_CH0MS)
+#define _pwm_ocmc_ch1         (TIMER_CHCTL0_CH1COMCTL | TIMER_CHCTL0_CH1MS)
+#define _pwm_ocmc_ch2         (TIMER_CHCTL1_CH2COMCTL | TIMER_CHCTL1_CH2MS)
+#define _pwm_ocmc_ch3         (TIMER_CHCTL1_CH3COMCTL | TIMER_CHCTL1_CH3MS)
+
+#define PWM_ENTRY(p, n, a, t, ch) { \
+    .port = (uint32_t)(p), \
+    .pin = (n), \
+    .af = (a), \
+    .timer = timerN(t), \
+    .ccr = _pwm_ccr(timerN(t), ch), \
+    .ccmr = (ch < 2 ? _pwm_ccmr_ch01(timerN(t)) : _pwm_ccmr_ch23(timerN(t))), \
+    .ois = _pwm_ois_ch##ch, \
+    .ocm = _pwm_ocm_ch##ch, \
+    .ocmc = _pwm_ocmc_ch##ch, \
+    .en = _pwm_en_ch##ch, \
+    .pol = _pwm_pol_ch##ch \
+}
+
+// PWM output pin table for GD32F4xx.
+// Covers the most common timer PWM pins on GD32F4xx devices.
+// Timer numbering: TIMER0..TIMER7 map to STM32 TIM1..TIM8.
 static const pwm_signal_t pwm_pin[] = {
-    {
-        .port = (uint32_t)SPINDLE_PWM_PORT,
-        .pin = SPINDLE_PWM_PIN,
-        .af = SPINDLE_PWM_AF,
-        .timer = timerN(SPINDLE_PWM_TIMER),
-        .channel = SPINDLE_PWM_CHANNEL,
-        .clock_hz = 84000000
-    },
-#ifdef LASER_PWM_PIN
-    {
-        .port = (uint32_t)LASER_PWM_PORT,
-        .pin = LASER_PWM_PIN,
-        .af = LASER_PWM_AF,
-        .timer = timerN(LASER_PWM_TIMER),
-        .channel = LASER_PWM_CHANNEL,
-        .clock_hz = 84000000
-    }
+#if !IS_TIMER_CLAIMED(TIMER0_BASE)
+    // TIMER0 (advanced timer, AF1)
+    PWM_ENTRY(GPIOA, 8,  GPIO_AF_1, 0, 0),
+    PWM_ENTRY(GPIOA, 9,  GPIO_AF_1, 0, 1),
+    PWM_ENTRY(GPIOA, 10, GPIO_AF_1, 0, 2),
+    PWM_ENTRY(GPIOA, 11, GPIO_AF_1, 0, 3),
+#endif
+#if !IS_TIMER_CLAIMED(TIMER1_BASE)
+    // TIMER1 (general-purpose timer, AF1)
+    PWM_ENTRY(GPIOA, 0,  GPIO_AF_1, 1, 0),
+    PWM_ENTRY(GPIOA, 1,  GPIO_AF_1, 1, 1),
+    PWM_ENTRY(GPIOA, 2,  GPIO_AF_1, 1, 2),
+    PWM_ENTRY(GPIOA, 3,  GPIO_AF_1, 1, 3),
+    PWM_ENTRY(GPIOA, 5,  GPIO_AF_1, 1, 0),
+    PWM_ENTRY(GPIOA, 15, GPIO_AF_1, 1, 0),
+    PWM_ENTRY(GPIOB, 3,  GPIO_AF_1, 1, 0),
+    PWM_ENTRY(GPIOB, 10, GPIO_AF_1, 1, 2),
+    PWM_ENTRY(GPIOB, 11, GPIO_AF_1, 1, 3),
+#endif
+#if !IS_TIMER_CLAIMED(TIMER2_BASE)
+    // TIMER2 (general-purpose timer, AF2)
+    PWM_ENTRY(GPIOA, 6,  GPIO_AF_2, 2, 0),
+    PWM_ENTRY(GPIOA, 7,  GPIO_AF_2, 2, 1),
+    PWM_ENTRY(GPIOB, 0,  GPIO_AF_2, 2, 2),
+    PWM_ENTRY(GPIOB, 1,  GPIO_AF_2, 2, 3),
+    PWM_ENTRY(GPIOB, 4,  GPIO_AF_2, 2, 0),
+    PWM_ENTRY(GPIOB, 5,  GPIO_AF_2, 2, 1),
+    PWM_ENTRY(GPIOC, 6,  GPIO_AF_2, 2, 0),
+    PWM_ENTRY(GPIOC, 7,  GPIO_AF_2, 2, 1),
+    PWM_ENTRY(GPIOC, 8,  GPIO_AF_2, 2, 2),
+    PWM_ENTRY(GPIOC, 9,  GPIO_AF_2, 2, 3),
+#endif
+#if !IS_TIMER_CLAIMED(TIMER3_BASE)
+    // TIMER3 (general-purpose timer, AF2)
+    PWM_ENTRY(GPIOB, 6,  GPIO_AF_2, 3, 0),
+    PWM_ENTRY(GPIOB, 7,  GPIO_AF_2, 3, 1),
+    PWM_ENTRY(GPIOB, 8,  GPIO_AF_2, 3, 2),
+    PWM_ENTRY(GPIOB, 9,  GPIO_AF_2, 3, 3),
+    PWM_ENTRY(GPIOD, 12, GPIO_AF_2, 3, 0),
+    PWM_ENTRY(GPIOD, 13, GPIO_AF_2, 3, 1),
+    PWM_ENTRY(GPIOD, 14, GPIO_AF_2, 3, 2),
+    PWM_ENTRY(GPIOD, 15, GPIO_AF_2, 3, 3),
+#endif
+#if !IS_TIMER_CLAIMED(TIMER7_BASE)
+    // TIMER7 (advanced timer, AF3)
+    PWM_ENTRY(GPIOC, 6,  GPIO_AF_3, 7, 0),
+    PWM_ENTRY(GPIOC, 7,  GPIO_AF_3, 7, 1),
+    PWM_ENTRY(GPIOC, 8,  GPIO_AF_3, 7, 2),
+    PWM_ENTRY(GPIOC, 9,  GPIO_AF_3, 7, 3),
+    PWM_ENTRY(GPIOA, 0,  GPIO_AF_3, 7, 0),
+    PWM_ENTRY(GPIOA, 7,  GPIO_AF_3, 7, 1),
+    PWM_ENTRY(GPIOB, 6,  GPIO_AF_3, 7, 0),
+    PWM_ENTRY(GPIOB, 7,  GPIO_AF_3, 7, 1),
+    PWM_ENTRY(GPIOB, 8,  GPIO_AF_3, 7, 2),
+    PWM_ENTRY(GPIOB, 9,  GPIO_AF_3, 7, 3),
+    PWM_ENTRY(GPIOE, 5,  GPIO_AF_3, 7, 0),
+    PWM_ENTRY(GPIOE, 6,  GPIO_AF_3, 7, 1),
 #endif
 };
 
+typedef struct {
+    uint32_t timer;
+    volatile uint32_t *ccr;
+} pwm_claimed_t;
+
 static uint_fast8_t n_claimed = 0;
-static const pwm_signal_t *pwm_claimed[2] = {0};
+static pwm_claimed_t pwm_claimed[8] = {0};
 
 bool pwm_is_available (uint32_t port, uint8_t pin)
 {
@@ -52,50 +138,52 @@ bool pwm_is_available (uint32_t port, uint8_t pin)
             pwm = &pwm_pin[i];
     } while(i && pwm == NULL);
 
-    if(pwm) {
-        for(i = 0; i < n_claimed; i++) {
-            if(pwm_claimed[i] == pwm)
-                return false;
-        }
-    }
+    if(pwm && (i = n_claimed)) do {
+        i--;
+        if(pwm->timer == pwm_claimed[i].timer)
+            return pwm->ccr != pwm_claimed[i].ccr;
+    } while(i);
 
-    return pwm != NULL;
+    return pwm && !timer_is_claimed(pwm->timer);
 }
 
 const pwm_signal_t *pwm_claim (uint32_t port, uint8_t pin)
 {
     const pwm_signal_t *pwm = NULL;
-    uint_fast8_t i = sizeof(pwm_pin) / sizeof(pwm_signal_t);
 
-    if(!pwm_is_available(port, pin))
-        return NULL;
+    if(pwm_is_available(port, pin)) {
 
-    do {
-        i--;
-        if(port == pwm_pin[i].port && pin == pwm_pin[i].pin)
-            pwm = &pwm_pin[i];
-    } while(i && pwm == NULL);
+        uint_fast8_t i = sizeof(pwm_pin) / sizeof(pwm_signal_t);
 
-    if(pwm && n_claimed < sizeof(pwm_claimed) / sizeof(pwm_claimed[0]))
-        pwm_claimed[n_claimed++] = pwm;
+        do {
+            i--;
+            if(port == pwm_pin[i].port && pin == pwm_pin[i].pin)
+                pwm = &pwm_pin[i];
+        } while(i && pwm == NULL);
+
+        if(pwm) {
+
+            uint32_t timer = 0;
+
+            if((i = n_claimed)) do {
+                if(pwm->timer == pwm_claimed[--i].timer)
+                    timer = pwm_claimed[i].timer;
+            } while(i && timer == 0);
+
+            if(timer || timer_claim(pwm->timer)) {
+                pwm_claimed[n_claimed].timer = pwm->timer;
+                pwm_claimed[n_claimed++].ccr = pwm->ccr;
+            } else
+                pwm = NULL;
+        }
+    }
 
     return pwm;
 }
 
 bool pwm_enable (const pwm_signal_t *pwm)
 {
-    if(pwm == NULL)
-        return false;
-
-    rcu_periph_clock_enable(pwm->port == GPIOA ? RCU_GPIOA :
-                            pwm->port == GPIOB ? RCU_GPIOB :
-                            pwm->port == GPIOC ? RCU_GPIOC :
-                            pwm->port == GPIOD ? RCU_GPIOD :
-                            pwm->port == GPIOE ? RCU_GPIOE :
-                            pwm->port == GPIOF ? RCU_GPIOF :
-                            pwm->port == GPIOG ? RCU_GPIOG :
-                            pwm->port == GPIOH ? RCU_GPIOH : RCU_GPIOI);
-    timerCLKEN(SPINDLE_PWM_TIMER);
+    timer_clk_enable(pwm->timer);
 
     gpio_af_set((uint32_t)pwm->port, pwm->af, 1U << pwm->pin);
     gpio_mode_set((uint32_t)pwm->port, GPIO_MODE_AF, GPIO_PUPD_NONE, 1U << pwm->pin);
@@ -111,7 +199,7 @@ bool pwm_config (const pwm_signal_t *pwm, uint32_t prescaler, uint32_t period, b
 
     uint32_t timer = pwm->timer;
 
-    timer_disable(timer);
+    TIMER_CTL0(timer) &= ~TIMER_CTL0_CEN;
 
     timer_parameter_struct init;
     timer_struct_para_init(&init);
@@ -123,35 +211,30 @@ bool pwm_config (const pwm_signal_t *pwm, uint32_t prescaler, uint32_t period, b
     init.repetitioncounter = 0;
     timer_init(timer, &init);
 
-    timer_oc_parameter_struct oc = {0};
-    oc.outputstate  = TIMER_CCX_ENABLE;
-    oc.outputnstate = TIMER_CCXN_DISABLE;
-    oc.ocpolarity   = inverted ? TIMER_OC_POLARITY_LOW : TIMER_OC_POLARITY_HIGH;
-    oc.ocnpolarity  = TIMER_OCN_POLARITY_HIGH;
-    oc.ocidlestate  = TIMER_OC_IDLE_STATE_LOW;
-    oc.ocnidlestate = TIMER_OCN_IDLE_STATE_LOW;
-    timer_channel_output_config(timer, pwm->channel, &oc);
-
-    timer_channel_output_pulse_value_config(timer, pwm->channel, 0);
-    timer_channel_output_mode_config(timer, pwm->channel, TIMER_OC_MODE_PWM0);
-    timer_channel_output_shadow_config(timer, pwm->channel, TIMER_OC_SHADOW_DISABLE);
+    *pwm->ccmr &= ~pwm->ocmc;
+    *pwm->ccmr |= pwm->ocm;
+    *pwm->ccr = 0;
 
     if(timer == timerN(0) || timer == timerN(7))
-        timer_primary_output_config(timer, ENABLE);
+        TIMER_CCHP(timer) |= TIMER_CCHP_ROS | TIMER_CCHP_IOS;
 
-    timer_auto_reload_shadow_enable(timer);
-    timer_enable(timer);
+    TIMER_CHCTL2(timer) &= ~pwm->en;
+
+    if(inverted) {
+        TIMER_CHCTL2(timer) |= pwm->pol;
+        TIMER_CTL1(timer) |= pwm->ois;
+    } else {
+        TIMER_CHCTL2(timer) &= ~pwm->pol;
+        TIMER_CTL1(timer) &= ~pwm->ois;
+    }
+    TIMER_CHCTL2(timer) |= pwm->en;
+
+    TIMER_CTL0(timer) |= TIMER_CTL0_CEN;
 
     return true;
 }
 
 uint32_t pwm_get_clock_hz (const pwm_signal_t *pwm)
 {
-    return pwm ? pwm->clock_hz : 0;
-}
-
-void pwm_set_value (const pwm_signal_t *pwm, uint_fast16_t value)
-{
-    if(pwm)
-        timer_channel_output_pulse_value_config(pwm->timer, pwm->channel, value);
+    return timer_get_clock_hz(pwm->timer);
 }

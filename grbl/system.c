@@ -58,6 +58,17 @@ its ready. This works exactly like the character-based realtime commands when pi
 directly from the incoming data stream.
 \param signals a \a control_signals_t union holding status of the signals.
 */
+/*
+ * 【控制信号中断处理函数】
+ * 当硬件引脚电平变化时触发（如急停按钮、安全门、循环启动等）。
+ * 此函数运行在中断上下文中(ISR_CODE)，因此必须快速执行。
+ *
+ * 处理逻辑：
+ *   1. 信号去断言（deasserted）处理：检测上升沿/下降沿
+ *   2. 关键信号（急停/复位/电机故障）：立即执行mc_reset()
+ *   3. 安全门信号：触发停车/保持流程
+ *   4. 其他控制信号：设置标志位，由主循环处理
+ */
 ISR_CODE void ISR_FUNC(control_interrupt_handler)(control_signals_t signals)
 {
     static const control_signals_t onoff_signals = {

@@ -21,8 +21,13 @@ typedef struct {
     uint8_t af;
     uint32_t port;
     uint32_t timer;
-    uint32_t channel;
-    uint32_t clock_hz;
+    volatile uint32_t *ccr;
+    volatile uint32_t *ccmr;
+    uint32_t ois;
+    uint32_t ocm;
+    uint32_t ocmc;
+    uint32_t en;
+    uint32_t pol;
 } pwm_signal_t;
 
 const pwm_signal_t *pwm_claim (uint32_t port, uint8_t pin);
@@ -30,4 +35,3 @@ bool pwm_enable (const pwm_signal_t *pwm);
 bool pwm_config (const pwm_signal_t *pwm, uint32_t prescaler, uint32_t period, bool inverted);
 bool pwm_is_available (uint32_t port, uint8_t pin);
 uint32_t pwm_get_clock_hz (const pwm_signal_t *pwm);
-void pwm_set_value (const pwm_signal_t *pwm, uint_fast16_t value);

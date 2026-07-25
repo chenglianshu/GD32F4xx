@@ -777,25 +777,6 @@ FLASHMEM static status_code_t cmd_mount_info (sys_state_t state, char *args)
     return Status_OK;
 }
 
-
-FLASHMEM static status_code_t sd_mount_info (void)
-{
-    vfs_drives_t *dh;
-
-    if((dh = vfs_drives_open())) {
-        vfs_drive_t *drive;
-        while((drive = vfs_drives_read(dh, true))) {
-            vfs_free_t *info;
-            if((info = vfs_drive_getfree(drive))) {
-                hal_sd.sd_free_size = (uint32_t)(info->size - info->used);
-            }
-        }
-        vfs_drives_close(dh);
-    }
-
-    return Status_OK;
-}
-
 FLASHMEM static status_code_t cmd_unlink (sys_state_t state, char *args)
 {
     status_code_t retval = Status_Unhandled;
@@ -917,7 +898,7 @@ FLASHMEM void fs_stream_init (void)
         {"CWD", cmd_cwd, {}, { .str = "$CWD=<path> - set current working directory" } },
         {"PWD", cmd_cwd, { .noargs = On }, { .str = "output current working directory" } }
     };
-    sd_mount_info();
+
     static sys_commands_t sdcard_commands = {
         .n_commands = sizeof(sdcard_command_list) / sizeof(sys_command_t),
         .commands = sdcard_command_list

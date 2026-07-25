@@ -30,20 +30,32 @@
 #include "driver.h"
 #include "serial.h"
 #include "flash.h"
+#include "encoders.h"
 
 #include "grbl/task.h"
 #include "grbl/motor_pins.h"
 #include "grbl/pin_bits_masks.h"
 #include "grbl/state_machine.h"
 #include "grbl/machine_limits.h"
-#include "sdcard/sdcard.h"
 
+#if EEPROM_ENABLE
+#include "eeprom/eeprom.h"
+#endif
+
+#if QEI_ENABLE || SPINDLE_ENCODER_ENABLE
 #include "grbl/encoders.h"
+#endif
+
 #if SDCARD_ENABLE
 #include "sdcard/sdcard.h"
 #include "ff.h"
 #include "diskio.h"
 #endif
+
+#if (LIMIT_MASK|CONTROL_MASK|DEVICES_IRQ_MASK) != (LIMIT_MASK_SUM+CONTROL_MASK_SUM+DEVICES_IRQ_MASK_SUM)
+#error "Interrupt enabled input pins must have unique pin numbers!"
+#endif
+
 #if USB_SERIAL_ENABLE
 #include "usb_serial.h"
 #endif
@@ -58,18 +70,19 @@
 void driver_spindles_init (void);
 #endif
 
-#if ENCODER_ENABLE
-void driver_encoders_init (void);
-#endif
-
 #if AUX_ANALOG_ENABLE
 void ioports_init_analog (pin_group_pins_t *aux_inputs, pin_group_pins_t *aux_outputs);
 #endif
 
+extern volatile uint32_t cycle_count;
 static uint32_t systick_safe_read = 0, cycles2us_factor = 0;
 static bool IOInitDone = false;
 static uint32_t aux_irq = 0;
 static pin_group_pins_t limit_inputs = {0};
+
+#ifdef SQUARING_ENABLED
+static axes_signals_t motors_1 = {AXES_BITMASK}, motors_2 = {AXES_BITMASK};
+#endif
 
 #define STEPPER_TIMER_DIV 4
 
@@ -616,7 +629,7 @@ static void bitsSetAtomic (volatile uint_fast16_t *value, uint_fast16_t bits);
 static uint_fast16_t bitsClearAtomic (volatile uint_fast16_t *value, uint_fast16_t bits);
 static uint_fast16_t valueSetAtomic (volatile uint_fast16_t *value, uint_fast16_t v);
 
-#if DRIVER_PROBES
+#if PROBE_ENABLE || PROBE2_ENABLE || TOOLSETTER_ENABLE
 static bool probeGetState (void *input);
 #endif
 
@@ -637,37 +650,40 @@ __attribute__((weak)) void motor_fault_add_pin (input_signal_t *input, xbar_t *p
 __attribute__((weak)) bool input_add_expander_pin (xbar_t *pin);
 #endif
 
-void encoder_pin_claimed (uint8_t port, xbar_t *pin);
-
 void gpio_irq_enable (const input_signal_t *input, pin_irq_mode_t irq_mode)
 {
     uint32_t port_index = GPIO_GET_INDEX(input->port);
 
-    exti_line_enum line = (exti_line_enum)(1U << input->pin);
-
     syscfg_exti_line_config((uint8_t)(EXTI_SOURCE_GPIOA + port_index), input->pin);
 
-    exti_trig_type_enum trig;
-    if (irq_mode == IRQ_Mode_Rising)
-        trig = EXTI_TRIG_RISING;
-    else if (irq_mode == IRQ_Mode_Falling)
-        trig = EXTI_TRIG_FALLING;
-    else
-        trig = EXTI_TRIG_BOTH;
+    uint32_t bit = input->bit;
 
-    exti_init(line, EXTI_INTERRUPT, trig);
-    exti_interrupt_flag_clear(line);
-    exti_interrupt_enable(line);
+    // Disable the line while reconfiguring, then clear any pending flag before
+    // enabling. This avoids servicing stale edges latched during prior GPIO
+    // reconfiguration (e.g. settings_changed).
+    EXTI_INTEN &= ~bit;
 
-    uint8_t irqn;
-    if (input->pin < 5)
-        irqn = EXTI0_IRQn + input->pin;
-    else if (input->pin < 10)
-        irqn = EXTI5_9_IRQn;
-    else
-        irqn = EXTI10_15_IRQn;
+    if(irq_mode == IRQ_Mode_Rising) {
+        EXTI_RTEN |= bit;
+        EXTI_FTEN &= ~bit;
+    } else if(irq_mode == IRQ_Mode_Falling) {
+        EXTI_RTEN &= ~bit;
+        EXTI_FTEN |= bit;
+    } else if(irq_mode == IRQ_Mode_Change) {
+        EXTI_RTEN |= bit;
+        EXTI_FTEN |= bit;
+    } else {
+        EXTI_RTEN &= ~bit;
+        EXTI_FTEN &= ~bit;
+    }
 
-    nvic_irq_enable((uint8_t)irqn, 1U, 0U);
+    EXTI_PD = bit;              // clear pending
+
+    if(irq_mode != IRQ_Mode_None)
+        EXTI_INTEN |= bit;      // enable interrupt
+
+    // NVIC is already enabled for this EXTI line by settings_changed().
+    // Do not reconfigure it here, to match STM32F4xx reference behavior.
 
     pin_irq[input->pin] = (input_signal_t *)input;
 }
@@ -806,7 +822,7 @@ static void stepperEnable (axes_signals_t enable, bool hold)
     (void)hold;
 
 #ifdef STEPPERS_ENABLE_PORT
-    // CNC_ED1 V1.1 uses a single active-low shared enable pin (PB8) for all axes.
+    // LKS_ED1 V1.1/V2.0 uses a single active-low shared enable pin (PB8) for all axes.
     // Drive the pin directly from the logical enable request: low when any current
     // axis is requested enabled, high when none are. This makes the shared enable
     // independent of $4/enable_invert settings, which is appropriate for fixed-
@@ -839,6 +855,58 @@ static void stepperWakeUp (void)
 }
 
 // Set stepper step output pins
+#ifdef SQUARING_ENABLED
+static inline __attribute__((always_inline)) void stepper_step_out (axes_signals_t step_out1)
+{
+    axes_signals_t step_out2;
+    step_out2.bits = step_out1.bits & motors_2.bits;
+    step_out1.bits = step_out1.bits & motors_1.bits;
+
+    uint32_t step1 = step_out1.mask ^ settings .steppers.step_invert.mask;
+    uint32_t step2 = step_out2.mask ^ settings .steppers.step_invert.mask;
+
+    DIGITAL_OUT(X_STEP_PORT, X_STEP_PIN, (step1 & X_AXIS_BIT) ? 1 : 0);
+    DIGITAL_OUT(Y_STEP_PORT, Y_STEP_PIN, (step1 & Y_AXIS_BIT) ? 1 : 0);
+    DIGITAL_OUT(Z_STEP_PORT, Z_STEP_PIN, (step1 & Z_AXIS_BIT) ? 1 : 0);
+#ifdef A_AXIS
+    DIGITAL_OUT(A_STEP_PORT, A_STEP_PIN, (step1 & A_AXIS_BIT) ? 1 : 0);
+#endif
+#ifdef B_AXIS
+    DIGITAL_OUT(B_STEP_PORT, B_STEP_PIN, (step1 & B_AXIS_BIT) ? 1 : 0);
+#endif
+#ifdef C_AXIS
+    DIGITAL_OUT(C_STEP_PORT, C_STEP_PIN, (step1 & C_AXIS_BIT) ? 1 : 0);
+#endif
+#ifdef U_AXIS
+    DIGITAL_OUT(U_STEP_PORT, U_STEP_PIN, (step1 & U_AXIS_BIT) ? 1 : 0);
+#endif
+#ifdef V_AXIS
+    DIGITAL_OUT(V_STEP_PORT, V_STEP_PIN, (step1 & V_AXIS_BIT) ? 1 : 0);
+#endif
+#ifdef W_AXIS
+    DIGITAL_OUT(W_STEP_PORT, W_STEP_PIN, (step1 & W_AXIS_BIT) ? 1 : 0);
+#endif
+
+#ifdef X2_STEP_PIN
+    DIGITAL_OUT(X2_STEP_PORT, X2_STEP_PIN, (step2 & X_AXIS_BIT) ? 1 : 0);
+#endif
+#ifdef Y2_STEP_PIN
+    DIGITAL_OUT(Y2_STEP_PORT, Y2_STEP_PIN, (step2 & Y_AXIS_BIT) ? 1 : 0);
+#endif
+#ifdef Z2_STEP_PIN
+    DIGITAL_OUT(Z2_STEP_PORT, Z2_STEP_PIN, (step2 & Z_AXIS_BIT) ? 1 : 0);
+#endif
+}
+
+// Enable/disable motors for auto squaring of ganged axes
+static void StepperDisableMotors (axes_signals_t axes, squaring_mode_t mode)
+{
+    motors_1.mask = (mode == SquaringMode_A || mode == SquaringMode_Both ? axes.mask : 0) ^ AXES_BITMASK;
+    motors_2.mask = (mode == SquaringMode_B || mode == SquaringMode_Both ? axes.mask : 0) ^ AXES_BITMASK;
+}
+
+#else // !SQUARING_ENABLED
+
 static inline __attribute__((always_inline)) void stepper_step_out (axes_signals_t step_out)
 {
     uint32_t step = step_out.mask ^ settings .steppers.step_invert.mask;
@@ -864,7 +932,19 @@ static inline __attribute__((always_inline)) void stepper_step_out (axes_signals
 #ifdef W_AXIS
     DIGITAL_OUT(W_STEP_PORT, W_STEP_PIN, (step & W_AXIS_BIT) ? 1 : 0);
 #endif
+
+#ifdef X2_STEP_PIN
+    DIGITAL_OUT(X2_STEP_PORT, X2_STEP_PIN, (step & X_AXIS_BIT) ? 1 : 0);
+#endif
+#ifdef Y2_STEP_PIN
+    DIGITAL_OUT(Y2_STEP_PORT, Y2_STEP_PIN, (step & Y_AXIS_BIT) ? 1 : 0);
+#endif
+#ifdef Z2_STEP_PIN
+    DIGITAL_OUT(Z2_STEP_PORT, Z2_STEP_PIN, (step & Z_AXIS_BIT) ? 1 : 0);
+#endif
 }
+
+#endif // SQUARING_ENABLED
 
 // Set stepper direction output pins
 static inline __attribute__((always_inline)) void stepper_dir_out (axes_signals_t dir_out)
@@ -892,7 +972,57 @@ static inline __attribute__((always_inline)) void stepper_dir_out (axes_signals_
 #ifdef W_AXIS
     DIGITAL_OUT(W_DIRECTION_PORT, W_DIRECTION_PIN, (dir & W_AXIS_BIT) ? 1 : 0);
 #endif
+
+#ifdef GANGING_ENABLED
+    uint32_t ganged_dir = dir ^ settings.steppers.ganged_dir_invert.mask;
+#ifdef X2_DIRECTION_PIN
+    DIGITAL_OUT(X2_DIRECTION_PORT, X2_DIRECTION_PIN, (ganged_dir & X_AXIS_BIT) ? 1 : 0);
+#endif
+#ifdef Y2_DIRECTION_PIN
+    DIGITAL_OUT(Y2_DIRECTION_PORT, Y2_DIRECTION_PIN, (ganged_dir & Y_AXIS_BIT) ? 1 : 0);
+#endif
+#ifdef Z2_DIRECTION_PIN
+    DIGITAL_OUT(Z2_DIRECTION_PORT, Z2_DIRECTION_PIN, (ganged_dir & Z_AXIS_BIT) ? 1 : 0);
+#endif
+#endif
 }
+
+#ifdef GANGING_ENABLED
+
+static axes_signals_t getGangedAxes (bool auto_squared)
+{
+    axes_signals_t ganged = {0};
+
+    if(auto_squared) {
+        #if X_AUTO_SQUARE
+            ganged.x = On;
+        #endif
+
+        #if Y_AUTO_SQUARE
+            ganged.y = On;
+        #endif
+
+        #if Z_AUTO_SQUARE
+            ganged.z = On;
+        #endif
+    } else {
+        #if X_GANGED
+            ganged.x = On;
+        #endif
+
+        #if Y_GANGED
+            ganged.y = On;
+        #endif
+
+        #if Z_GANGED
+            ganged.z = On;
+        #endif
+    }
+
+    return ganged;
+}
+
+#endif // GANGING_ENABLED
 
 static void stepperGoIdle (bool clear_signals)
 {
@@ -1095,6 +1225,88 @@ static limit_signals_t limitsGetState (void)
     return signals;
 }
 
+#if HOME_MASK
+// Returns home state as an home_signals_t variable.
+// Each bitfield bit indicates an axis home switch, where triggered is 1 and not triggered is 0.
+inline static home_signals_t homeGetState (void)
+{
+    home_signals_t signals = {0};
+
+    signals.a.mask = settings.home_invert.mask;
+#ifdef DUAL_HOME_SWITCHES
+    signals.a.mask = settings.home_invert.mask;
+#endif
+
+#if HOME_INMODE == GPIO_BITBAND
+    signals.a.x = DIGITAL_IN(X_HOME_PORT, X_HOME_PIN);
+    signals.a.y = DIGITAL_IN(Y_HOME_PORT, Y_HOME_PIN);
+    signals.a.z = DIGITAL_IN(Z_HOME_PORT, Z_HOME_PIN);
+  #ifdef A_HOME_PIN
+    signals.a.a = DIGITAL_IN(A_HOME_PORT, A_HOME_PIN);
+  #endif
+  #ifdef B_HOME_PIN
+    signals.a.b = DIGITAL_IN(B_HOME_PORT, B_HOME_PIN);
+  #endif
+  #ifdef C_HOME_PIN
+    signals.a.c = DIGITAL_IN(C_HOME_PORT, C_HOME_PIN);
+  #endif
+  #ifdef U_HOME_PIN
+    signals.a.u = DIGITAL_IN(U_HOME_PORT, U_HOME_PIN);
+  #endif
+  #ifdef V_HOME_PIN
+    signals.a.v = DIGITAL_IN(V_HOME_PORT, V_HOME_PIN);
+  #endif
+  #ifdef W_HOME_PIN
+    signals.a.w = DIGITAL_IN(W_HOME_PORT, W_HOME_PIN);
+  #endif
+#elif HOME_INMODE == GPIO_MAP
+    uint32_t bits = HOME_PORT->IDR;
+    signals.a.x = !!(bits & X_HOME_BIT);
+    signals.a.y = !!(bits & Y_HOME_BIT);
+    signals.a.z = !!(bits & Z_HOME_BIT);
+  #ifdef A_HOME_PIN
+    signals.a.a = !!(bits & A_HOME_BIT);
+  #endif
+  #ifdef B_HOME_PIN
+    signals.a.b = !!(bits & B_HOME_BIT);
+  #endif
+  #ifdef C_HOME_PIN
+    signals.a.c = !!(bits & C_HOME_BIT);
+  #endif
+  #ifdef U_HOME_PIN
+    signals.a.u = !!(bits & U_HOME_BIT);
+  #endif
+  #ifdef V_HOME_PIN
+    signals.a.v = !!(bits & V_HOME_BIT);
+  #endif
+  #ifdef W_HOME_PIN
+    signals.a.w = !!(bits & W_HOME_BIT);
+  #endif
+#else
+    signals.a.value = (uint8_t)((HOME_PORT->IDR & HOME_MASK) >> HOME_INMODE);
+#endif
+
+#ifdef X2_HOME_PIN
+    signals.b.x = DIGITAL_IN(X2_HOME_PORT, X2_HOME_PIN);
+#endif
+#ifdef Y2_HOME_PIN
+    signals.b.y = DIGITAL_IN(Y2_HOME_PORT, Y2_HOME_PIN);
+#endif
+#ifdef Z2_HOME_PIN
+    signals.b.z = DIGITAL_IN(Z2_HOME_PORT, Z2_HOME_PIN);
+#endif
+
+    if (settings.limits.invert.mask) {
+        signals.a.value ^= settings.home_invert.mask;
+#ifdef DUAL_HOME_SWITCHES
+        signals.b.value ^= settings.home_invert.mask;
+#endif
+    }
+
+    return signals;
+}
+#endif // HOME_MASK
+
 static void limitsEnable (bool on, axes_signals_t homing_cycle)
 {
     bool disable = !on;
@@ -1151,7 +1363,7 @@ static coolant_state_t coolantGetState (void)
 // Probe callback
 // -----------------------------------------------------------------------------
 
-#if DRIVER_PROBES
+#if PROBE_ENABLE || PROBE2_ENABLE || TOOLSETTER_ENABLE
 
 // Returns the probe triggered pin state.
 static bool probeGetState (void *input)
@@ -1159,7 +1371,7 @@ static bool probeGetState (void *input)
     return DIGITAL_IN(((input_signal_t *)input)->port, ((input_signal_t *)input)->pin);
 }
 
-#endif // DRIVER_PROBES
+#endif // PROBE_ENABLE || PROBE2_ENABLE || TOOLSETTER_ENABLE
 
 // -----------------------------------------------------------------------------
 // Peripheral pin registration
@@ -1202,18 +1414,8 @@ static char *port2char (gpio_port_t port)
 {
     static char name[3] = "P?";
 
-    uint8_t index = 0;
-    if (port == GPIOA) index = 0;
-    else if (port == GPIOB) index = 1;
-    else if (port == GPIOC) index = 2;
-    else if (port == GPIOD) index = 3;
-    else if (port == GPIOE) index = 4;
-    else if (port == GPIOF) index = 5;
-    else if (port == GPIOG) index = 6;
-    else if (port == GPIOH) index = 7;
-    else if (port == GPIOI) index = 8;
+    name[1] = 'A' + GPIO_GET_INDEX(port);
 
-    name[1] = 'A' + index;
     return name;
 }
 
@@ -1360,6 +1562,7 @@ void settings_changed (settings_t *settings, settings_changed_flags_t changed)
 
             if(input->group != PinGroup_AuxInput)
                 input->mode.irq_mode = IRQ_Mode_None;
+
 
             switch(input->id) {
 
@@ -1599,7 +1802,7 @@ static control_signals_t systemGetState (void)
 #ifdef CYCLE_START_PIN
     signals.cycle_start = DIGITAL_IN(CYCLE_START_PORT, CYCLE_START_PIN);
 #endif
-#ifdef SAFETY_DOOR_PIN
+#if SAFETY_DOOR_ENABLE
     if(debounce.safety_door)
         signals.safety_door_ajar = !settings.control_invert.safety_door_ajar;
     else
@@ -1607,6 +1810,9 @@ static control_signals_t systemGetState (void)
 #endif
 #ifdef MOTOR_FAULT_PIN
     signals.motor_fault = DIGITAL_IN(MOTOR_FAULT_PORT, MOTOR_FAULT_PIN);
+#endif
+#ifdef MOTOR_WARNING_PIN
+    signals.motor_warning = DIGITAL_IN(MOTOR_WARNING_PORT, MOTOR_WARNING_PIN);
 #endif
 
     if(settings.control_invert.mask)
@@ -1630,21 +1836,6 @@ __attribute__((weak)) bool input_add_expander_pin (xbar_t *pin)
     return false;
 }
 #endif
-
-static aux_ctrl_t *aux_ctrl_get_fn (aux_gpio_t gpio)
-{
-    aux_ctrl_t *ctrl_pin = NULL;
-
-    if(sizeof(aux_ctrl) / sizeof(aux_ctrl_t)) {
-        uint_fast8_t idx;
-        for(idx = 0; ctrl_pin == NULL && aux_ctrl[idx].gpio.pin != 0xFF && idx < sizeof(aux_ctrl) / sizeof(aux_ctrl_t); idx++) {
-            if(aux_ctrl[idx].gpio.pin == gpio.pin && aux_ctrl[idx].gpio.port == gpio.port)
-                ctrl_pin = &aux_ctrl[idx];
-        }
-    }
-
-    return ctrl_pin;
-}
 
 static void aux_assign_irq (void)
 {
@@ -1771,13 +1962,23 @@ static bool aux_claim_explicit (aux_ctrl_t *aux_ctrl)
 
 static uint64_t getElapsedMicros (void)
 {
-    uint32_t ms = hal_get_tick();
-    uint32_t cyc = DWT->CYCCNT;
-    uint32_t cyc_per_ms = SystemCoreClock / 1000UL;
-    uint32_t cyc_per_us = SystemCoreClock / 1000000UL;
-    uint32_t frac = cyc % cyc_per_ms;
+    uint32_t ms, cycles;
 
-    return (uint64_t)ms * 1000ULL + (uint64_t)(frac / cyc_per_us);
+    // Use LDREX/STREX to atomically sample the SysTick ms counter and the
+    // DWT->CYCCNT snapshot taken at the last SysTick. Any exception between
+    // LDREX and STREX clears the exclusive monitor and forces a retry.
+    do {
+        __LDREXW(&systick_safe_read);
+        ms = hal_get_tick();
+        cycles = cycle_count;
+    } while(__STREXW(1, &systick_safe_read));
+
+    uint32_t cyccnt = DWT->CYCCNT;
+    asm volatile("" : : : "memory");
+    uint32_t ccdelta = cyccnt - cycles;
+    uint32_t frac = ((uint64_t)ccdelta * cycles2us_factor) >> 32;
+
+    return (uint64_t)ms * 1000ULL + (frac > 1000 ? 1000 : frac);
 }
 
 #if STEP_INJECT_ENABLE
@@ -2076,17 +2277,26 @@ static bool driver_setup (settings_t *settings)
 
 bool driver_init (void)
 {
+#ifdef MPG_MODE_PIN
+    // Drive MPG mode input pin low until setup is complete.
+    // This prevents the MPG from being seen as active while pins are still
+    // being configured. The pin is later reconfigured as an input in settings_changed().
+    DIGITAL_OUT(MPG_MODE_PORT, MPG_MODE_PIN, 0);
+    gpio_mode_set(MPG_MODE_PORT, GPIO_MODE_OUTPUT, GPIO_PUPD_NONE, 1 << MPG_MODE_PIN);
+#endif
+
     hal.info = "GD32F425RET6 grblHAL";
-    hal.driver_version = "240716";
+    hal.driver_version = "260724";
     hal.driver_url = GRBL_URL "/GD32F4xx";
     hal.board = BOARD_NAME;
     hal.f_mcu = SystemCoreClock / 1000000UL;
     hal.f_step_timer = timer_clk_enable(STEPPER_TIMER) / STEPPER_TIMER_DIV;
+    cycles2us_factor = 0xFFFFFFFFU / hal.f_mcu;
     hal.step_us_min = 2.0f;
     hal.rx_buffer_size = RX_BUFFER_SIZE;
     hal.get_free_mem = get_free_mem;
     hal.driver_setup = driver_setup;
-    hal.delay_ms = driver_delay;
+    hal.delay_ms = &driver_delay;
     hal.settings_changed = settings_changed;
 
     hal.timer.claim = timerClaim;
@@ -2100,9 +2310,18 @@ bool driver_init (void)
     hal.stepper.cycles_per_tick = stepperCyclesPerTick;
     hal.stepper.pulse_start = stepperPulseStart;
     hal.stepper.motor_iterator = motor_iterator;
+#ifdef GANGING_ENABLED
+    hal.stepper.get_ganged = getGangedAxes;
+#endif
+#ifdef SQUARING_ENABLED
+    hal.stepper.disable_motors = StepperDisableMotors;
+#endif
 
     hal.limits.get_state = limitsGetState;
     hal.limits.enable = limitsEnable;
+#if HOME_MASK
+    hal.homing.get_state = homeGetState;
+#endif
 
     hal.coolant.set_state = coolantSetState;
     hal.coolant.get_state = coolantGetState;

@@ -124,10 +124,16 @@ static void spindleSetState (spindle_ptrs_t *spindle, spindle_state_t state, flo
 
 static void pwm_off (spindle_ptrs_t *spindle)
 {
-    if(spindle->context.pwm->flags.always_on)
-        pwm_set_value(&spindle_timer, spindle->context.pwm->off_value);
-    else
-        pwm_set_value(&spindle_timer, 0);
+    if(spindle->context.pwm->flags.always_on) {
+        *spindle_timer.ccr = spindle->context.pwm->off_value;
+        if(spindle_timer.timer == timerN(0) || spindle_timer.timer == timerN(7))
+            TIMER_CCHP(spindle_timer.timer) |= TIMER_CCHP_POEN;
+    } else {
+        if(spindle_timer.timer == timerN(0) || spindle_timer.timer == timerN(7))
+            TIMER_CCHP(spindle_timer.timer) &= ~TIMER_CCHP_POEN;
+        else
+            *spindle_timer.ccr = 0;
+    }
 }
 
 // Sets spindle speed
@@ -138,7 +144,7 @@ static void spindleSetSpeed (spindle_ptrs_t *spindle, uint_fast16_t pwm_value)
         if(spindle->context.pwm->flags.rpm_controlled) {
             spindle_off(spindle);
             if(spindle->context.pwm->flags.laser_off_overdrive)
-                pwm_set_value(&spindle_timer, spindle->context.pwm->pwm_overdrive);
+                *spindle_timer.ccr = spindle->context.pwm->pwm_overdrive;
         } else
             pwm_off(spindle);
 
@@ -147,7 +153,9 @@ static void spindleSetSpeed (spindle_ptrs_t *spindle, uint_fast16_t pwm_value)
         if(!spindle->context.pwm->flags.enable_out && spindle->context.pwm->flags.rpm_controlled)
             spindle_on(spindle);
 
-        pwm_set_value(&spindle_timer, pwm_value);
+        *spindle_timer.ccr = pwm_value;
+        if(spindle_timer.timer == timerN(0) || spindle_timer.timer == timerN(7))
+            TIMER_CCHP(spindle_timer.timer) |= TIMER_CCHP_POEN;
     }
 }
 
@@ -334,10 +342,16 @@ static void spindle1SetState (spindle_ptrs_t *spindle, spindle_state_t state, fl
 
 static void pwm1_off (spindle_ptrs_t *spindle)
 {
-    if(spindle->context.pwm->flags.always_on)
-        pwm_set_value(&spindle1_timer, spindle->context.pwm->off_value);
-    else
-        pwm_set_value(&spindle1_timer, 0);
+    if(spindle->context.pwm->flags.always_on) {
+        *spindle1_timer.ccr = spindle->context.pwm->off_value;
+        if(spindle1_timer.timer == timerN(0) || spindle1_timer.timer == timerN(7))
+            TIMER_CCHP(spindle1_timer.timer) |= TIMER_CCHP_POEN;
+    } else {
+        if(spindle1_timer.timer == timerN(0) || spindle1_timer.timer == timerN(7))
+            TIMER_CCHP(spindle1_timer.timer) &= ~TIMER_CCHP_POEN;
+        else
+            *spindle1_timer.ccr = 0;
+    }
 }
 
 // Sets spindle speed
@@ -348,7 +362,7 @@ static void spindle1SetSpeed (spindle_ptrs_t *spindle, uint_fast16_t pwm_value)
         if(spindle->context.pwm->flags.rpm_controlled) {
             spindle1_off(spindle);
             if(spindle->context.pwm->flags.laser_off_overdrive)
-                pwm_set_value(&spindle1_timer, spindle->context.pwm->pwm_overdrive);
+                *spindle1_timer.ccr = spindle->context.pwm->pwm_overdrive;
         } else
             pwm1_off(spindle);
 
@@ -357,7 +371,9 @@ static void spindle1SetSpeed (spindle_ptrs_t *spindle, uint_fast16_t pwm_value)
         if(!spindle->context.pwm->flags.enable_out && spindle->context.pwm->flags.rpm_controlled)
             spindle1_on(spindle);
 
-        pwm_set_value(&spindle1_timer, pwm_value);
+        *spindle1_timer.ccr = pwm_value;
+        if(spindle1_timer.timer == timerN(0) || spindle1_timer.timer == timerN(7))
+            TIMER_CCHP(spindle1_timer.timer) |= TIMER_CCHP_POEN;
     }
 }
 
@@ -541,7 +557,7 @@ bool aux_out_claim_explicit (aux_ctrl_out_t *aux_ctrl)
 
 void driver_spindles_init (void)
 {
-#if DRIVER_SPINDLE_ENABLE
+#if DRIVER_SPINDLE_ENABLE && defined(SPINDLE_ENABLE_PIN)
 
  #if DRIVER_SPINDLE_ENABLE & SPINDLE_PWM
 
@@ -571,7 +587,7 @@ void driver_spindles_init (void)
     if(!(spindle_timer.timer && (spindle_id = spindle_register(&spindle, DRIVER_SPINDLE_NAME)) != -1))
         task_run_on_startup(report_warning, "PWM spindle failed to initialize!");
 
- #elif defined(SPINDLE_ENABLE_PIN)
+ #else
 
     static const spindle_ptrs_t spindle = {
         .type = SpindleType_Basic,
@@ -596,7 +612,7 @@ void driver_spindles_init (void)
 
 #endif // DRIVER_SPINDLE_ENABLE
 
-#if DRIVER_SPINDLE1_ENABLE
+#if DRIVER_SPINDLE1_ENABLE && defined(SPINDLE1_ENABLE_PIN)
 
  #if DRIVER_SPINDLE1_ENABLE & SPINDLE_PWM
 
@@ -631,7 +647,7 @@ void driver_spindles_init (void)
             task_run_on_startup(report_warning, "PWM2 spindle failed to initialize!");
     }
 
- #elif defined(SPINDLE1_ENABLE_PIN)
+ #else
 
    static const spindle_ptrs_t spindle1 = {
        .type = SpindleType_Basic,
@@ -690,3 +706,4 @@ bool aux_out_claim_explicit (aux_ctrl_out_t *aux_ctrl)
 }
 
 #endif // DRIVER_SPINDLE_ENABLE || DRIVER_SPINDLE1_ENABLE
+

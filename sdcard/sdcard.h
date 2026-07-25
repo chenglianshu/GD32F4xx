@@ -37,7 +37,7 @@
 #elif defined(ARDUINO_SAMD_MKRZERO)
 #include "../../ff.h"
 #include "../../diskio.h"
-#elif defined(STM32_PLATFORM) || defined(__LPC17XX__) || defined(__IMXRT1062__) || defined(RP2040) || defined(GD32F4xx)
+#elif defined(STM32_PLATFORM) || defined(__LPC17XX__) || defined(__IMXRT1062__) || defined(RP2040)
 #include "ff.h"
 #include "diskio.h"
 #else
@@ -55,31 +55,6 @@ typedef struct {
 
 typedef stream_job_t sdcard_job_t;
 
-
-typedef struct {                
-    uint32_t sd_trans_speed;
-    uint32_t sd_slow_speed;
-
-    // uint16_t fw_file_size;   
-    uint8_t sd_type;                                /* 描述SD卡类型 */
-    uint8_t is_has_sd;                              /* 0:no, 1: have */
-
-    uint32_t sd_all_size;                           /* SD卡总容量 */
-    uint32_t sd_free_size;                          /* SD卡剩余容量 */
-    uint32_t sd_used_size;                          /* SD卡剩余容量 */
-}hal_sd_t;
-
-extern hal_sd_t hal_sd;
-
-typedef enum SDState_t {
-    SD_Idle  = 0,
-    SD_NotPresent  = 1,
-    SD_Busy  = 2,
-    SD_BusyPrinting  = 2,
-    SD_BusyUploading  = 4,
-    SD_BusyParsing  = 5,
-}SDState;
-
 #define sdcard_get_job_info() stream_get_job_info() // Deprecated, call stream_get_job_info() directly.
 #define sdcard_busy() stream_is_file()              // Deprecated, call stream_is_file() directly.
 
@@ -87,8 +62,5 @@ sdcard_events_t *sdcard_init (void);
 FATFS *sdcard_getfs (void);
 void sdcard_detect (bool mount);
 void sdcard_early_mount (void);
-SDState set_sd_state(SDState state);
-SDState get_sd_state(void);
-void get_fafts_info(void);
 
 #endif // FS_ENABLE & FS_SDCARD

@@ -21,6 +21,19 @@
 
 #define SPIPORT SPIport(SPI_PORT)
 
+// Derive SPI pin mapping from SPI_PORT (STM32F4xx style).
+#if SPI_PORT == 0
+  #define SPI_SCK_PORT      GPIOA
+  #define SPI_SCK_PIN       5
+  #define SPI_MISO_PORT     GPIOA
+  #define SPI_MISO_PIN      6
+  #define SPI_MOSI_PORT     GPIOA
+  #define SPI_MOSI_PIN      7
+  #define SPI_AF            GPIO_AF_5
+#else
+  #error "Add SPI pin mapping for SPI_PORT"
+#endif
+
 static spi_parameter_struct spi_init_struct = {
     .trans_mode           = SPI_TRANSMODE_FULLDUPLEX,
     .device_mode          = SPI_MASTER,

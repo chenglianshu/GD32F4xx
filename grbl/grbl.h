@@ -37,6 +37,8 @@
 #include "config.h"
 
 // grblHAL versioning system
+// grblHAL版本号系统：基于Grbl 1.1f协议，但功能远超原版
+// Build号格式为日期：20260518 = 2026年5月18日
 #if COMPATIBILITY_LEVEL == 0
 #define GRBL_VERSION "1.1f"
 #else
@@ -100,10 +102,21 @@
 // g-code programs, maybe selected for interface programs.
 // NOTE: If changed, manually update help message in report.c.
 
-#define CMD_EXIT                    0x03 //!< ctrl-C (ETX)
-#define CMD_REBOOT                  0x14 //!< ctrl-T (DC4) - only acted upon if preceded by 0x1B (ESC)
-#define CMD_RESET                   0x18 //!< ctrl-X (CAN)
-#define CMD_STOP                    0x19 //!< ctrl-Y (EM)
+/*
+ * 【实时命令定义】
+ * 这些特殊字符从串口数据流中直接截取，不经过G代码解析器。
+ * 用于在加工过程中实时控制机床状态（急停、暂停、速度调整等）。
+ *
+ * 分类：
+ *   - ASCII控制字符 (0x00-0x1F)：基础控制命令（复位、停止等）
+ *   - 扩展ASCII字符 (0x80-0xBF)：高级实时命令（速度覆盖、状态报告等）
+ *   - 宏命令 (0xB0-0xB7)：用户自定义宏，由插件系统使用
+ */
+
+#define CMD_EXIT                    0x03 //!< ctrl-C (ETX) - 退出命令
+#define CMD_REBOOT                  0x14 //!< ctrl-T (DC4) - 重启MCU（需先发送ESC 0x1B）
+#define CMD_RESET                   0x18 //!< ctrl-X (CAN) - 软复位，清除所有缓冲区和状态
+#define CMD_STOP                    0x19 //!< ctrl-Y (EM) - 立即停止运动
 #define CMD_STATUS_REPORT_LEGACY    '?'
 #define CMD_CYCLE_START_LEGACY      '~'
 #define CMD_FEED_HOLD_LEGACY        '!'
@@ -112,36 +125,37 @@
 // NOTE: All realtime commands must be in the extended ASCII character set, starting
 // at character value 128 (0x80) and up to 191 (0xBF). Do not assign values > 191 since those
 // are for the first character in UTF-8 code points.
-#define CMD_STATUS_REPORT                   0x80 // (128) TODO: use 0x05 ctrl-E ENQ instead?
-#define CMD_CYCLE_START                     0x81 // (129) TODO: use 0x06 ctrl-F ACK instead? or SYN/DC2/DC3?
-#define CMD_FEED_HOLD                       0x82 // (130) TODO: use 0x15 ctrl-U NAK instead?
-#define CMD_GCODE_REPORT                    0x83 // (131)
-#define CMD_SAFETY_DOOR                     0x84 // (132)
-#define CMD_JOG_CANCEL                      0x85 // (133)
+// 扩展实时命令：用于进给倍率调整、主轴控制、冷却液开关等
+#define CMD_STATUS_REPORT                   0x80 // (128) 请求一次状态报告（位置、状态等）
+#define CMD_CYCLE_START                     0x81 // (129) 恢复/开始加工循环
+#define CMD_FEED_HOLD                       0x82 // (130) 进给保持（暂停当前运动）
+#define CMD_GCODE_REPORT                    0x83 // (131) 报告当前G代码解析器状态
+#define CMD_SAFETY_DOOR                     0x84 // (132) 安全门触发
+#define CMD_JOG_CANCEL                      0x85 // (133) 取消手动点动
 //#define CMD_DEBUG_REPORT 0x86 // Only when DEBUG enabled, sends debug report in '{}' braces.
-#define CMD_STATUS_REPORT_ALL               0x87 // (135)
-#define CMD_OPTIONAL_STOP_TOGGLE            0x88 // (136)
-#define CMD_SINGLE_BLOCK_TOGGLE             0x89 // (137)
-#define CMD_OVERRIDE_FAN0_TOGGLE            0x8A //!< (138) Toggle Fan 0 on/off, not implemented by the core.
-#define CMD_MPG_MODE_TOGGLE                 0x8B //!< (139) Toggle MPG mode on/off, available when the MPG stream is enabled with MPG mode 2.
-#define CMD_AUTO_REPORTING_TOGGLE           0x8C //!< (140) Toggle auto real time reporting if configured.
-#define CMD_OVERRIDE_FEED_RESET             0x90 //!< (144) Restores feed override value to 100%.
-#define CMD_OVERRIDE_FEED_COARSE_PLUS       0x91 // (145)
-#define CMD_OVERRIDE_FEED_COARSE_MINUS      0x92 // (146)
-#define CMD_OVERRIDE_FEED_FINE_PLUS         0x93 // (147)
-#define CMD_OVERRIDE_FEED_FINE_MINUS        0x94 // (148)
-#define CMD_OVERRIDE_RAPID_RESET            0x95 //!< (149) Restores rapid override value to 100%.
-#define CMD_OVERRIDE_RAPID_MEDIUM           0x96 // (150)
-#define CMD_OVERRIDE_RAPID_LOW              0x97 // (151)
+#define CMD_STATUS_REPORT_ALL               0x87 // (135) 请求完整状态报告（包含所有信息）
+#define CMD_OPTIONAL_STOP_TOGGLE            0x88 // (136) 切换可选停止(M1)开关
+#define CMD_SINGLE_BLOCK_TOGGLE             0x89 // (137) 切换单段运行模式
+#define CMD_OVERRIDE_FAN0_TOGGLE            0x8A //!< (138) 切换风扇0开关，由插件实现
+#define CMD_MPG_MODE_TOGGLE                 0x8B //!< (139) 切换MPG（手轮）模式开关
+#define CMD_AUTO_REPORTING_TOGGLE           0x8C //!< (140) 切换自动实时报告开关
+#define CMD_OVERRIDE_FEED_RESET             0x90 //!< (144) 进给倍率重置为100%
+#define CMD_OVERRIDE_FEED_COARSE_PLUS       0x91 // (145) 进给倍率粗调增加 +10%
+#define CMD_OVERRIDE_FEED_COARSE_MINUS      0x92 // (146) 进给倍率粗调减少 -10%
+#define CMD_OVERRIDE_FEED_FINE_PLUS         0x93 // (147) 进给倍率精调增加 +1%
+#define CMD_OVERRIDE_FEED_FINE_MINUS        0x94 // (148) 进给倍率精调减少 -1%
+#define CMD_OVERRIDE_RAPID_RESET            0x95 //!< (149) 快速移动倍率重置为100%
+#define CMD_OVERRIDE_RAPID_MEDIUM           0x96 // (150) 快速移动设为50%速度
+#define CMD_OVERRIDE_RAPID_LOW              0x97 // (151) 快速移动设为25%速度
 // #define CMD_OVERRIDE_RAPID_EXTRA_LOW 0x98 // *NOT SUPPORTED*
-#define CMD_OVERRIDE_SPINDLE_RESET 			0x99 // (153) Restores spindle override value to 100%.
-#define CMD_OVERRIDE_SPINDLE_COARSE_PLUS    0x9A // (154)
-#define CMD_OVERRIDE_SPINDLE_COARSE_MINUS   0x9B // (155)
-#define CMD_OVERRIDE_SPINDLE_FINE_PLUS      0x9C // (156)
-#define CMD_OVERRIDE_SPINDLE_FINE_MINUS     0x9D // (157)
-#define CMD_OVERRIDE_SPINDLE_STOP           0x9E // (158)
-#define CMD_OVERRIDE_COOLANT_FLOOD_TOGGLE   0xA0 // (160)
-#define CMD_OVERRIDE_COOLANT_MIST_TOGGLE    0xA1 // (161)
+#define CMD_OVERRIDE_SPINDLE_RESET 			0x99 // (153) 主轴转速倍率重置为100%
+#define CMD_OVERRIDE_SPINDLE_COARSE_PLUS    0x9A // (154) 主轴倍率粗调增加 +10%
+#define CMD_OVERRIDE_SPINDLE_COARSE_MINUS   0x9B // (155) 主轴倍率粗调减少 -10%
+#define CMD_OVERRIDE_SPINDLE_FINE_PLUS      0x9C // (156) 主轴倍率精调增加 +1%
+#define CMD_OVERRIDE_SPINDLE_FINE_MINUS     0x9D // (157) 主轴倍率精调减少 -1%
+#define CMD_OVERRIDE_SPINDLE_STOP           0x9E // (158) 停止主轴
+#define CMD_OVERRIDE_COOLANT_FLOOD_TOGGLE   0xA0 // (160) 切换冷却液（大量冲水）开关
+#define CMD_OVERRIDE_COOLANT_MIST_TOGGLE    0xA1 // (161) 切换冷却液（喷雾）开关
 #define CMD_PID_REPORT                      0xA2 // (162)
 #define CMD_TOOL_ACK                        0xA3 // (163)
 #define CMD_PROBE_CONNECTED_TOGGLE          0xA4 // (164)
@@ -186,7 +200,8 @@
 // Configure rapid, feed, and spindle override settings. These values define the max and min
 // allowable override values and the coarse and fine increments per command received. Please
 // note the allowable values in the descriptions following each define.
-#define DEFAULT_FEED_OVERRIDE           100 // 100%. Don't change this value.
+// 【进给倍率配置】可通过实时命令动态调整加工速度
+#define DEFAULT_FEED_OVERRIDE           100 // 100%. 默认进给倍率，不要修改此值
 #ifndef MAX_FEED_RATE_OVERRIDE
 #define MAX_FEED_RATE_OVERRIDE          200 // Percent of programmed feed rate (100-65535). Usually 120% or 200%
 #endif
@@ -216,6 +231,11 @@
 // frequencies below 10kHz, where the aliasing between axes of multi-axis motions can cause audible
 // noise and shake your machine. At even lower step frequencies, AMASS adapts and provides even better
 // step smoothing. See stepper.c for more details on the AMASS system works.
+// 【AMASS - 自适应多轴步进平滑算法】
+// 在低步进频率（<10kHz）下，多轴运动的时间混叠会产生可听噪声和机械振动。
+// AMASS通过自适应调整时间基准来平滑步进脉冲，改善运动质量。
+// 例如：3轴同时运动时，如果不使用AMASS，三轴脉冲可能聚集在同一时刻，
+//       造成机械冲击。AMASS将脉冲分散到更精细的时间网格中。
 #ifndef ADAPTIVE_MULTI_AXIS_STEP_SMOOTHING
 #define ADAPTIVE_MULTI_AXIS_STEP_SMOOTHING 1 // Default enabled. Set to 0 to disable.
 #endif

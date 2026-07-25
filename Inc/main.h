@@ -19,3 +19,4 @@ extern uint32_t SystemCoreClock;
 uint32_t hal_get_tick(void);
 void delay_ms(uint32_t ms);
 void delay_1ms(uint32_t count);
+void HAL_Delay(uint32_t Delay);

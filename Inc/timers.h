@@ -21,9 +21,3 @@ hal_timer_t timerClaim (timer_cap_t cap, uint32_t timebase);
 bool timerCfg (hal_timer_t timer, timer_cfg_t *cfg);
 bool timerStart (hal_timer_t timer, uint32_t period);
 bool timerStop (hal_timer_t timer);
-
-/* Stepper-specific helpers */
-
-void stepper_timer_init (void);
-void stepper_timer_load (uint32_t ticks);
-void stepper_timer_isr (void);

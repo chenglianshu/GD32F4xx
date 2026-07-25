@@ -4,6 +4,7 @@
 #include "grbl/grbllib.h"
 
 volatile static uint32_t sys_tick = 0;
+volatile uint32_t cycle_count = 0;
 volatile static uint32_t delay;
 
 void systick_config(void);
@@ -82,6 +83,7 @@ void delay_decrement(void)
 
 void SysTick_Handler(void)
 {
+    cycle_count = DWT->CYCCNT;
     sys_tick++;
     delay_decrement();
     Driver_IncTick();
@@ -96,4 +98,13 @@ void delay_ms(uint32_t ms)
 {
     uint32_t start = sys_tick;
     while ((sys_tick - start) < ms);
+}
+
+void HAL_Delay(uint32_t Delay)
+{
+	#if defined(USE_FREERTOS_RTOS)
+	vTaskDelay(Delay);
+	#else
+	delay_1ms(Delay);
+	#endif
 }

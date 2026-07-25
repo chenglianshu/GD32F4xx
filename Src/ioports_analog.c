@@ -58,35 +58,36 @@
 typedef struct {
     gpio_port_t port;
     uint8_t pin;
-    uint8_t adc;
+    uint8_t adc_index;  // 0 = ADC0, 1 = ADC1, 2 = ADC2
+    uint32_t adc;       // ADC0, ADC1 or ADC2 base address
     uint32_t ch;
 } adc_map_t;
 
 static const adc_map_t adc_map[] = {
-    { GPIOA,  0, 0, ADC_CHANNEL_0 },
-    { GPIOA,  1, 0, ADC_CHANNEL_1 },
-    { GPIOA,  2, 0, ADC_CHANNEL_2 },
-    { GPIOA,  3, 0, ADC_CHANNEL_3 },
-    { GPIOA,  4, 0, ADC_CHANNEL_4 },
-    { GPIOA,  5, 0, ADC_CHANNEL_5 },
-    { GPIOA,  6, 0, ADC_CHANNEL_6 },
-    { GPIOA,  7, 0, ADC_CHANNEL_7 },
-    { GPIOB,  0, 0, ADC_CHANNEL_8 },
-    { GPIOB,  1, 0, ADC_CHANNEL_9 },
-    { GPIOC,  0, 0, ADC_CHANNEL_10 },
-    { GPIOC,  1, 0, ADC_CHANNEL_11 },
-    { GPIOC,  2, 0, ADC_CHANNEL_12 },
-    { GPIOC,  3, 0, ADC_CHANNEL_13 },
-    { GPIOC,  4, 0, ADC_CHANNEL_14 },
-    { GPIOC,  5, 0, ADC_CHANNEL_15 },
-    { GPIOF,  3, 0, ADC_CHANNEL_9 },
-    { GPIOF,  4, 0, ADC_CHANNEL_14 },
-    { GPIOF,  5, 0, ADC_CHANNEL_15 },
-    { GPIOF,  6, 0, ADC_CHANNEL_4 },
-    { GPIOF,  7, 0, ADC_CHANNEL_5 },
-    { GPIOF,  8, 0, ADC_CHANNEL_6 },
-    { GPIOF,  9, 0, ADC_CHANNEL_7 },
-    { GPIOF, 10, 0, ADC_CHANNEL_8 }
+    { GPIOA,  0, 0, ADC0, ADC_CHANNEL_0 },
+    { GPIOA,  1, 0, ADC0, ADC_CHANNEL_1 },
+    { GPIOA,  2, 0, ADC0, ADC_CHANNEL_2 },
+    { GPIOA,  3, 0, ADC0, ADC_CHANNEL_3 },
+    { GPIOA,  4, 1, ADC1, ADC_CHANNEL_4 },
+    { GPIOA,  5, 1, ADC1, ADC_CHANNEL_5 },
+    { GPIOA,  6, 1, ADC1, ADC_CHANNEL_6 },
+    { GPIOA,  7, 1, ADC1, ADC_CHANNEL_7 },
+    { GPIOB,  0, 1, ADC1, ADC_CHANNEL_8 },
+    { GPIOB,  1, 1, ADC1, ADC_CHANNEL_9 },
+    { GPIOC,  0, 0, ADC0, ADC_CHANNEL_10 },
+    { GPIOC,  1, 0, ADC0, ADC_CHANNEL_11 },
+    { GPIOC,  2, 0, ADC0, ADC_CHANNEL_12 },
+    { GPIOC,  3, 0, ADC0, ADC_CHANNEL_13 },
+    { GPIOC,  4, 1, ADC1, ADC_CHANNEL_14 },
+    { GPIOC,  5, 1, ADC1, ADC_CHANNEL_15 },
+    { GPIOF,  3, 2, ADC2, ADC_CHANNEL_9 },
+    { GPIOF,  4, 2, ADC2, ADC_CHANNEL_14 },
+    { GPIOF,  5, 2, ADC2, ADC_CHANNEL_15 },
+    { GPIOF,  6, 2, ADC2, ADC_CHANNEL_4 },
+    { GPIOF,  7, 2, ADC2, ADC_CHANNEL_5 },
+    { GPIOF,  8, 2, ADC2, ADC_CHANNEL_6 },
+    { GPIOF,  9, 2, ADC2, ADC_CHANNEL_7 },
+    { GPIOF, 10, 2, ADC2, ADC_CHANNEL_8 }
 };
 
 static io_ports_data_t analog;
@@ -180,12 +181,20 @@ static void pwm_out (uint8_t port, float value)
 
         if(pwm_value == aux_out_analog[port].pwm->data.off_value) {
             if(aux_out_analog[port].pwm->data.always_on) {
-                pwm_set_value(pwm, aux_out_analog[port].pwm->data.off_value);
-                pwm_set_value(pwm, 0);
-            } else
-                pwm_set_value(pwm, 0);
-        } else
-            pwm_set_value(pwm, pwm_value);
+                *pwm->ccr = aux_out_analog[port].pwm->data.off_value;
+                if(pwm->timer == timerN(0) || pwm->timer == timerN(7))
+                    TIMER_CCHP(pwm->timer) |= TIMER_CCHP_POEN;
+                *pwm->ccr = 0;
+            } else {
+                if(pwm->timer == timerN(0) || pwm->timer == timerN(7))
+                    TIMER_CCHP(pwm->timer) |= TIMER_CCHP_POEN;
+                *pwm->ccr = 0;
+            }
+        } else {
+            *pwm->ccr = pwm_value;
+            if(pwm->timer == timerN(0) || pwm->timer == timerN(7))
+                TIMER_CCHP(pwm->timer) |= TIMER_CCHP_POEN;
+        }
     }
 }
 
@@ -256,19 +265,31 @@ static bool analog_out (uint8_t port, float value)
 
 #endif // AUX_ANALOG_OUT
 
+static uint32_t adc_last_channel[3] = {0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF};
+
+static inline int adc_index (uint32_t adc)
+{
+    return adc == ADC0 ? 0 : adc == ADC1 ? 1 : adc == ADC2 ? 2 : -1;
+}
+
 static inline int32_t adc_read (uint32_t adc, uint32_t channel)
 {
     int32_t value = -1;
+    int idx;
 
-    if(adc) {
+    if(adc && (idx = adc_index(adc)) >= 0) {
 
-        adc_regular_channel_config(adc, 0, (uint8_t)channel, ADC_SAMPLETIME_15);
+        if(adc_last_channel[idx] != channel) {
+            adc_regular_channel_config(adc, 0, (uint8_t)channel, ADC_SAMPLETIME_3);
+            adc_last_channel[idx] = channel;
+        }
+
         adc_software_trigger_enable(adc, ADC_REGULAR_CHANNEL);
 
-        uint32_t timeout = 10000;
-        while((RESET == adc_flag_get(adc, ADC_FLAG_EOC)) && --timeout);
+        uint32_t timeout = hal_get_tick() + 2;
+        while((RESET == adc_flag_get(adc, ADC_FLAG_EOC)) && hal_get_tick() <= timeout);
 
-        if(timeout)
+        if(adc_flag_get(adc, ADC_FLAG_EOC))
             value = (int32_t)adc_regular_data_read(adc);
     }
 
@@ -363,13 +384,18 @@ static void set_pin_description (io_port_direction_t dir, uint8_t port, const ch
         aux_out_analog[port].description = description;
 }
 
-static void adc_init_peripheral (uint32_t adc)
+static bool adc_init_peripheral (uint32_t adc)
 {
-    rcu_periph_clock_enable(adc == ADC0 ? RCU_ADC0 :
-                            adc == ADC1 ? RCU_ADC1 :
-                            adc == ADC2 ? RCU_ADC2 : RCU_ADC0);
+    if(adc == ADC0)
+        rcu_periph_clock_enable(RCU_ADC0);
+    else if(adc == ADC1)
+        rcu_periph_clock_enable(RCU_ADC1);
+    else if(adc == ADC2)
+        rcu_periph_clock_enable(RCU_ADC2);
+    else
+        return false;
 
-    adc_clock_config(ADC_ADCCK_PCLK2_DIV8);
+    adc_clock_config(ADC_ADCCK_PCLK2_DIV4);
     adc_special_function_config(adc, ADC_SCAN_MODE, DISABLE);
     adc_special_function_config(adc, ADC_CONTINUOUS_MODE, DISABLE);
     adc_data_alignment_config(adc, ADC_DATAALIGN_RIGHT);
@@ -377,6 +403,8 @@ static void adc_init_peripheral (uint32_t adc)
     adc_channel_length_config(adc, ADC_REGULAR_CHANNEL, 1);
     adc_external_trigger_config(adc, ADC_REGULAR_CHANNEL, EXTERNAL_TRIGGER_DISABLE);
     adc_enable(adc);
+
+    return true;
 }
 
 void ioports_init_analog (pin_group_pins_t *aux_inputs, pin_group_pins_t *aux_outputs)
@@ -402,28 +430,38 @@ void ioports_init_analog (pin_group_pins_t *aux_inputs, pin_group_pins_t *aux_ou
         if(aux_inputs->n_pins) {
 
             uint_fast8_t i;
+            bool adc_initialized[3] = {false, false, false};
 
             for(i = 0; i < aux_inputs->n_pins; i++) {
 
                 uint_fast8_t j = sizeof(adc_map) / sizeof(adc_map_t);
+                bool found = false;
 
                 do {
                     j--;
                     if(adc_map[j].port == aux_inputs->pins.inputs[i].port && adc_map[j].pin == aux_inputs->pins.inputs[i].pin) {
 
-                        uint32_t adc = adc_map[j].adc == 0 ? ADC0 :
-                                       adc_map[j].adc == 1 ? ADC1 :
-                                       adc_map[j].adc == 2 ? ADC2 : ADC0;
+                        uint32_t adc = adc_map[j].adc;
+                        int adc_idx = adc_index(adc);
 
-                        adc_init_peripheral(adc);
+                        if(adc_idx >= 0 && (!adc_initialized[adc_idx] || adc_init_peripheral(adc))) {
 
-                        gpio_mode_set((uint32_t)aux_inputs->pins.inputs[i].port, GPIO_MODE_ANALOG, GPIO_PUPD_NONE, aux_inputs->pins.inputs[i].bit);
+                            adc_initialized[adc_idx] = true;
 
-                        aux_inputs->pins.inputs[i].adc = (void *)adc;
-                        aux_inputs->pins.inputs[i].channel = adc_map[j].ch;
+                            gpio_mode_set((uint32_t)aux_inputs->pins.inputs[i].port, GPIO_MODE_ANALOG, GPIO_PUPD_NONE, aux_inputs->pins.inputs[i].bit);
+
+                            aux_inputs->pins.inputs[i].adc = (void *)adc;
+                            aux_inputs->pins.inputs[i].channel = adc_map[j].ch;
+                            found = true;
+                        }
                         break;
                     }
                 } while(j);
+
+                if(!found) {
+                    aux_inputs->pins.inputs[i].adc = NULL;
+                    analog.in.n_ports--;
+                }
             }
         }
 

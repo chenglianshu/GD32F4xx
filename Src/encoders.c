@@ -136,14 +136,22 @@ static const gd32_pcnt_hw_t counters[] = {
 #ifdef TIMER7
     { .port = GPIOA, .pin = 0, .af = GPIO_AF_3, .timer = timer(7), .ecm = false },
 #endif
+#if !IS_TIMER_CLAIMED(TIMER1_BASE)
     { .port = GPIOA, .pin = 5, .af = GPIO_AF_1, .timer = timer(1), .ecm = false },
     { .port = GPIOA, .pin = 15, .af = GPIO_AF_1, .timer = timer(1), .ecm = false },
     { .port = GPIOB, .pin = 8, .af = GPIO_AF_1, .timer = timer(1), .ecm = false },
+#endif
+#if !IS_TIMER_CLAIMED(TIMER0_BASE)
     { .port = GPIOA, .pin = 12, .af = GPIO_AF_1, .timer = timer(0), .ecm = false },
     { .port = GPIOE, .pin = 7, .af = GPIO_AF_1, .timer = timer(0), .ecm = false },
+#endif
+#if !IS_TIMER_CLAIMED(TIMER2_BASE)
     { .port = GPIOB, .pin = 4, .af = GPIO_AF_2, .timer = timer(2), .ecm = true },
     { .port = GPIOD, .pin = 2, .af = GPIO_AF_2, .timer = timer(2), .ecm = false },
+#endif
+#if !IS_TIMER_CLAIMED(TIMER3_BASE)
     { .port = GPIOE, .pin = 0, .af = GPIO_AF_2, .timer = timer(3), .ecm = false }
+#endif
 };
 
 #endif
@@ -545,14 +553,6 @@ void encoder_pin_claimed (uint8_t port, xbar_t *pin)
 #if QEI_ENABLE && defined(QEI_A_PIN) && defined(QEI_B_PIN)
     _encoder_pin_claimed(port, pin);
 #endif
-}
-
-// Stub for the higher-level encoder plugin init. The full encoder/encoder.c plugin
-// (settings, MPG jogging, etc.) is not ported yet; this stub allows the hardware
-// driver in this file to compile and link when ENCODER_ENABLE is non-zero.
-bool encoder_init (void)
-{
-    return false;
 }
 
 #if SPINDLE_ENCODER_ENABLE || (QEI_ENABLE && defined(QEI_PORT))

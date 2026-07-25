@@ -14,6 +14,27 @@
 /* Primary serial port from board map */
 #define USART               usart(SERIAL_PORT)
 #define USART_IRQn          usartINT(SERIAL_PORT)
+
+// Derive UART0 pin mapping from SERIAL_PORT (STM32F4xx style).
+// GD32F4xx USART0 maps to STM32 USART1; remap encodings are GD32-specific.
+#if SERIAL_PORT == 0
+  // USART0 remapped to PB6/PB7 (LKS_ED1 V2.0 default)
+  #define UART0_TX_PORT     GPIOB
+  #define UART0_TX_PIN      6
+  #define UART0_RX_PORT     GPIOB
+  #define UART0_RX_PIN      7
+  #define UART0_GPIO_AF     GPIO_AF_7
+#elif SERIAL_PORT == 10
+  // USART0 default PA9/PA10
+  #define UART0_TX_PORT     GPIOA
+  #define UART0_TX_PIN      9
+  #define UART0_RX_PORT     GPIOA
+  #define UART0_RX_PIN      10
+  #define UART0_GPIO_AF     GPIO_AF_7
+#else
+  #error "Add UART0 pin mapping for SERIAL_PORT"
+#endif
+
 #define UART_TX_RX_GPIO     UART0_TX_PORT
 #define UART_TX_GPIO_PIN    BIT(UART0_TX_PIN)
 #define UART_RX_GPIO_PIN    BIT(UART0_RX_PIN)

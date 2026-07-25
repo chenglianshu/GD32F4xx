@@ -59,6 +59,10 @@
 // mutually exclusive, or cannot exist on the same line, because they each toggle a state or execute
 // a unique motion. These are defined in the NIST RS274-NGC v3 g-code standard, available online,
 // and are similar/identical to other g-code interpreters by manufacturers (Haas,Fanuc,Mazak,etc).
+// 【G代码模态组定义】
+// 模态组是互斥的G代码命令组，同一行中同一组只能出现一个命令。
+// 例如：G0(快速移动)和G1(直线插补)属于同一个模态组(Motion)，不能同时存在。
+// 这种设计符合NIST RS274-NGC v3标准。
 typedef union {
     uint32_t mask;
     struct {

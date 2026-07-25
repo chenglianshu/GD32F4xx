@@ -34,6 +34,7 @@
 #include "protocol.h"
 #include "machine_limits.h"
 
+// 【实时命令队列大小】必须是2的幂次方，用于环形缓冲区快速取模运算
 #ifndef RT_QUEUE_SIZE
 #define RT_QUEUE_SIZE 16 // must be a power of 2
 #endif
@@ -120,6 +121,7 @@ FLASHMEM static bool recheck_line (char *line, line_flags_t *flags)
 */
 bool protocol_main_loop (void)
 {
+    static bool first_restart = false;
     if(sys.alarm == Alarm_SelftestFailed) {
         sys.alarm = Alarm_None;
         system_raise_alarm(Alarm_SelftestFailed);
@@ -202,6 +204,17 @@ bool protocol_main_loop (void)
     xcommand[0] = '\0';
     char_counter = 0;
     keep_rt_commands = false;
+
+
+    if(first_restart == true) {
+      mc_reset();
+      first_restart = false; 
+    }
+    else{
+      if(state_get() == STATE_ALARM){
+        state_set(STATE_IDLE);
+      }
+    }
 
     while(true) {
 

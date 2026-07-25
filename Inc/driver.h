@@ -11,12 +11,6 @@
 #include "main.h"
 #include "pwm.h"
 
-#if defined(BOARD_CNC_ED1_V20)
-  #include "boards/cnc_ed1_v20_map.h"
-#else
-  #error "Board not defined"
-#endif
-
 #if defined(_WIZCHIP_) && _WIZCHIP_ > 0
 #undef ETHERNET_ENABLE
 #define ETHERNET_ENABLE 1
@@ -26,14 +20,27 @@
 
 #include "grbl/driver_opts.h"
 
+#if defined(BOARD_CNC_ED1_V20)
+  #include "boards/cnc_ed1_v20_map.h"
+#else
+  #error "Board not defined"
+#endif
+
 #include "timers.h"
 
-#include "grbl/driver_opts2.h"
+
+#ifndef CONTROL_ENABLE
+#define CONTROL_ENABLE (CONTROL_HALT|CONTROL_FEED_HOLD|CONTROL_CYCLE_START)
+#endif
 
 // -----------------------------------------------------------------------------
 // HAL type mappings
 // -----------------------------------------------------------------------------
 typedef uint32_t gpio_port_t;
+
+// GPIO input mode constants (match STM32 driver.h)
+#define GPIO_MAP     14
+#define GPIO_BITBAND 15
 
 // -----------------------------------------------------------------------------
 // GPIO bit operation macros
@@ -181,12 +188,24 @@ void ioports_event (input_signal_t *input);
 uint32_t hal_get_tick(void);
 void delay_ms(uint32_t ms);
 
-void stepper_timer_init(void);
-void stepper_timer_load(uint32_t ticks);
 
-// Steppers use TIMER3 on the CNC_ED1 V1.1 board.
+// Timer base addresses for compile-time guards (GD32 SPL TIMERx macros are runtime expressions).
+#define TIMER0_BASE         0x40010000U
+#define TIMER1_BASE         0x40000000U
+#define TIMER2_BASE         0x40000400U
+#define TIMER3_BASE         0x40000800U
+#define TIMER4_BASE         0x40000C00U
+#define TIMER5_BASE         0x40001000U
+#define TIMER6_BASE         0x40001400U
+#define TIMER7_BASE         0x40010400U
+
+// Steppers use TIMER3 on the LKS_ED1 V1.1 board.
 #define STEPPER_TIMER_N     3
 #define STEPPER_TIMER       timerBase(STEPPER_TIMER_N)
+#define STEPPER_TIMER_BASE  TIMER3_BASE
+
+// Compile-time guard for timers already reserved by the driver (matches STM32F4xx style).
+#define IS_TIMER_CLAIMED(INSTANCE) (((INSTANCE) == STEPPER_TIMER_BASE))
 
 // Spindle PWM uses TIMER0 CH2 (PA10).
 #define SPINDLE_PWM_TIMER_N     SPINDLE_PWM_TIMER

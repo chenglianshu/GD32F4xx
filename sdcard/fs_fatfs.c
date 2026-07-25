@@ -33,7 +33,7 @@
 #elif defined(ARDUINO_SAMD_MKRZERO)
 #include "../../ff.h"
 #include "../../diskio.h"
-#elif defined(STM32_PLATFORM) || defined(__LPC17XX__) || defined(__IMXRT1062__) || defined(RP2040) || defined(GD32F4xx)
+#elif defined(STM32_PLATFORM) || defined(__LPC17XX__) || defined(__IMXRT1062__) || defined(RP2040)
 #include "ff.h"
 #include "diskio.h"
 #else

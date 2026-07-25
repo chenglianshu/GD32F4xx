@@ -9,19 +9,44 @@ typedef struct {
     timer_resolution_t resolution;
     bool claimed;
     timer_cfg_t cfg;
+    timer_cap_t cap;
     IRQn_Type irq;
     uint32_t freq_hz;
 } dtimer_t;
 
 static dtimer_t timers[] = {
-    { .timer = TIMER0,  .irq = TIMER0_UP_TIMER9_IRQn,       .resolution = Timer_16bit },
-    { .timer = TIMER1,  .irq = TIMER1_IRQn,                 .resolution = Timer_32bit },
-    { .timer = TIMER2,  .irq = TIMER2_IRQn,                 .resolution = Timer_16bit },
-    { .timer = TIMER3,  .irq = TIMER3_IRQn,                 .resolution = Timer_16bit },
-    { .timer = TIMER4,  .irq = TIMER4_IRQn,                 .resolution = Timer_16bit },
-    { .timer = TIMER5,  .irq = TIMER5_DAC_IRQn,             .resolution = Timer_32bit },
-    { .timer = TIMER6,  .irq = TIMER6_IRQn,                 .resolution = Timer_16bit },
-    { .timer = TIMER7,  .irq = TIMER7_UP_TIMER12_IRQn,      .resolution = Timer_16bit },
+#if !IS_TIMER_CLAIMED(TIMER0_BASE)
+    { .timer = TIMER0,  .irq = TIMER0_UP_TIMER9_IRQn,  .resolution = Timer_16bit,
+      .cap = { .comp1 = 1, .comp2 = 1, .comp3 = 1 } },
+#endif
+#if !IS_TIMER_CLAIMED(TIMER1_BASE)
+    { .timer = TIMER1,  .irq = TIMER1_IRQn,            .resolution = Timer_32bit,
+      .cap = { .comp1 = 1, .comp2 = 1, .comp3 = 1 } },
+#endif
+#if !IS_TIMER_CLAIMED(TIMER2_BASE)
+    { .timer = TIMER2,  .irq = TIMER2_IRQn,            .resolution = Timer_16bit,
+      .cap = { .comp1 = 1, .comp2 = 1, .comp3 = 1 } },
+#endif
+#if IS_TIMER_CLAIMED(TIMER3_BASE)
+    { .timer = TIMER3,  .irq = TIMER3_IRQn,            .resolution = Timer_16bit,
+      .cap = { .comp1 = 1, .comp2 = 1, .comp3 = 1 } },
+#endif
+#if !IS_TIMER_CLAIMED(TIMER4_BASE)
+    { .timer = TIMER4,  .irq = TIMER4_IRQn,            .resolution = Timer_16bit,
+      .cap = { .comp1 = 1, .comp2 = 1, .comp3 = 1 } },
+#endif
+#if !IS_TIMER_CLAIMED(TIMER5_BASE)
+    { .timer = TIMER5,  .irq = TIMER5_DAC_IRQn,        .resolution = Timer_16bit,
+      .cap = {0} },
+#endif
+#if !IS_TIMER_CLAIMED(TIMER6_BASE)
+    { .timer = TIMER6,  .irq = TIMER6_IRQn,            .resolution = Timer_16bit,
+      .cap = {0} },
+#endif
+#if !IS_TIMER_CLAIMED(TIMER7_BASE)
+    { .timer = TIMER7,  .irq = TIMER7_UP_TIMER12_IRQn, .resolution = Timer_16bit,
+      .cap = { .comp1 = 1, .comp2 = 1, .comp3 = 1 } },
+#endif
 };
 
 static dtimer_t *timer_get (uint32_t timer)
@@ -47,7 +72,7 @@ timer_cap_t timer_get_cap (uint32_t timer)
 {
     dtimer_t *dtimer;
 
-    return (dtimer = timer_get(timer)) ? (timer_cap_t){ .periodic = 1, .up = 1, .comp1 = 1, .comp2 = 1, .comp3 = 1 } : (timer_cap_t){0};
+    return (dtimer = timer_get(timer)) ? dtimer->cap : (timer_cap_t){0};
 }
 
 hal_timer_t timer_claim (uint32_t timer)
@@ -154,6 +179,10 @@ hal_timer_t timerClaim (timer_cap_t cap, uint32_t timebase)
             init.repetitioncounter = 0;
             timer_init(timers[idx].timer, &init);
 
+            TIMER_CTL0(timers[idx].timer) |= TIMER_CTL0_SPM | TIMER_CTL0_DIR | TIMER_CTL0_ARSE;
+            TIMER_INTF(timers[idx].timer) &= ~(TIMER_INT_FLAG_UP | TIMER_INT_FLAG_CH0 | TIMER_INT_FLAG_CH1 | TIMER_INT_FLAG_CH2);
+            TIMER_CNT(timers[idx].timer) = 0;
+
             nvic_irq_enable(timers[idx].irq, 0, 1);
             break;
         }
@@ -165,20 +194,36 @@ hal_timer_t timerClaim (timer_cap_t cap, uint32_t timebase)
 bool timerCfg (hal_timer_t timer, timer_cfg_t *cfg)
 {
     bool ok;
+    uint32_t t = ((dtimer_t *)timer)->timer;
 
     if((ok = timer != NULL)) {
 
         memcpy(&((dtimer_t *)timer)->cfg, cfg, sizeof(timer_cfg_t));
 
         if(cfg->single_shot)
-            timer_single_pulse_mode_config(((dtimer_t *)timer)->timer, TIMER_SP_MODE_SINGLE);
+            TIMER_CTL0(t) |= TIMER_CTL0_SPM;
         else
-            timer_single_pulse_mode_config(((dtimer_t *)timer)->timer, TIMER_SP_MODE_REPETITIVE);
+            TIMER_CTL0(t) &= ~TIMER_CTL0_SPM;
 
-        if(cfg->timeout_callback)
-            timer_interrupt_enable(((dtimer_t *)timer)->timer, TIMER_INT_UP);
+        if(ok && cfg->irq0_callback && (ok = ((dtimer_t *)timer)->cap.comp1))
+            TIMER_DMAINTEN(t) |= TIMER_INT_CH0;
         else
-            timer_interrupt_disable(((dtimer_t *)timer)->timer, TIMER_INT_UP);
+            TIMER_DMAINTEN(t) &= ~TIMER_INT_CH0;
+
+        if(ok && cfg->irq1_callback && (ok = ((dtimer_t *)timer)->cap.comp2))
+            TIMER_DMAINTEN(t) |= TIMER_INT_CH1;
+        else
+            TIMER_DMAINTEN(t) &= ~TIMER_INT_CH1;
+
+        if(ok && cfg->irq2_callback && (ok = ((dtimer_t *)timer)->cap.comp3))
+            TIMER_DMAINTEN(t) |= TIMER_INT_CH2;
+        else
+            TIMER_DMAINTEN(t) &= ~TIMER_INT_CH2;
+
+        if(ok && cfg->timeout_callback)
+            TIMER_DMAINTEN(t) |= TIMER_INT_UP;
+        else
+            TIMER_DMAINTEN(t) &= ~TIMER_INT_UP;
 
         nvic_irq_enable(((dtimer_t *)timer)->irq, 0, 1);
     }
@@ -188,19 +233,37 @@ bool timerCfg (hal_timer_t timer, timer_cfg_t *cfg)
 
 bool timerStart (hal_timer_t timer, uint32_t period)
 {
-    dtimer_t *dtimer = (dtimer_t *)timer;
+    uint32_t t = ((dtimer_t *)timer)->timer;
 
-    if(dtimer == NULL)
-        return false;
+    if(!(TIMER_CTL0(t) & TIMER_CTL0_CEN) ||
+         (TIMER_CTL0(t) & TIMER_CTL0_SPM) ||
+          period != ((dtimer_t *)timer)->cfg.period) {
 
-    if(dtimer->cfg.period != period || (TIMER_CTL0(dtimer->timer) & TIMER_CTL0_CEN) == 0) {
+        ((dtimer_t *)timer)->cfg.period = period;
 
-        dtimer->cfg.period = period;
+        period--;
 
-        timer_autoreload_value_config(dtimer->timer, period - 1);
-        timer_counter_value_config(dtimer->timer, 0);
-        timer_interrupt_flag_clear(dtimer->timer, TIMER_INT_FLAG_UP);
-        timer_enable(dtimer->timer);
+        if(((dtimer_t *)timer)->cfg.irq1_callback) {
+            TIMER_CH1CV(t) = period;
+            period += ((dtimer_t *)timer)->cfg.irq1;
+        }
+
+        if(((dtimer_t *)timer)->cfg.irq0_callback) {
+            TIMER_CH0CV(t) = period;
+            period += ((dtimer_t *)timer)->cfg.irq0;
+        }
+
+        TIMER_CAR(t) = period;
+
+        if(!(TIMER_CTL0(t) & TIMER_CTL0_CEN)) {
+            TIMER_SWEVG(t) = TIMER_EVENT_SRC_UPG;
+            TIMER_INTF(t) &= ~(TIMER_INT_FLAG_UP | TIMER_INT_FLAG_CH0 | TIMER_INT_FLAG_CH1 | TIMER_INT_FLAG_CH2);
+            if(!(TIMER_DMAINTEN(t) & TIMER_INT_UP)) {
+                TIMER_DMAINTEN(t) |= TIMER_INT_UP;
+                TIMER_SWEVG(t) = TIMER_EVENT_SRC_UPG;
+            }
+            TIMER_CTL0(t) |= TIMER_CTL0_CEN;
+        }
     }
 
     return true;
@@ -208,13 +271,10 @@ bool timerStart (hal_timer_t timer, uint32_t period)
 
 bool timerStop (hal_timer_t timer)
 {
-    dtimer_t *dtimer = (dtimer_t *)timer;
+    uint32_t t = ((dtimer_t *)timer)->timer;
 
-    if(dtimer == NULL)
-        return false;
-
-    timer_interrupt_disable(dtimer->timer, TIMER_INT_UP);
-    timer_disable(dtimer->timer);
+    TIMER_DMAINTEN(t) = 0;
+    TIMER_CTL0(t) &= ~TIMER_CTL0_CEN;
 
     return true;
 }
@@ -223,66 +283,120 @@ bool timerStop (hal_timer_t timer)
 // IRQ handlers
 // -----------------------------------------------------------------------------
 
-static void timer_irq_handler (dtimer_t *dtimer)
+__attribute__((always_inline)) static inline void _irq_handler (uint32_t timer, timer_cfg_t *cfg)
 {
-    if (dtimer == NULL || dtimer->cfg.timeout_callback == NULL)
-        return;
+    uint32_t irq = TIMER_INTF(timer) & TIMER_DMAINTEN(timer);
 
-    if (timer_interrupt_flag_get(dtimer->timer, TIMER_INT_FLAG_UP)) {
-        timer_interrupt_flag_clear(dtimer->timer, TIMER_INT_FLAG_UP);
-        dtimer->cfg.timeout_callback(dtimer->cfg.context);
-    }
+    TIMER_INTF(timer) &= ~(TIMER_INT_FLAG_UP | TIMER_INT_FLAG_CH0 | TIMER_INT_FLAG_CH1 | TIMER_INT_FLAG_CH2);
+
+    if(irq & TIMER_INT_FLAG_UP)
+        cfg->timeout_callback(cfg->context);
+
+    if(irq & TIMER_INT_FLAG_CH0)
+        cfg->irq0_callback(cfg->context);
+
+    if(irq & TIMER_INT_FLAG_CH1)
+        cfg->irq1_callback(cfg->context);
+
+    if(irq & TIMER_INT_FLAG_CH2)
+        cfg->irq2_callback(cfg->context);
 }
 
-#define TIMER_IRQ_DISPATCH(n) \
-    void TIMER##n##_IRQHandler(void) { \
-        timer_irq_handler(timer_get(TIMER##n)); \
-    }
+#if !IS_TIMER_CLAIMED(TIMER0_BASE)
 
-TIMER_IRQ_DISPATCH(1)
-TIMER_IRQ_DISPATCH(2)
-TIMER_IRQ_DISPATCH(4)
-TIMER_IRQ_DISPATCH(5)
-TIMER_IRQ_DISPATCH(6)
+enum {
+  TIMER0_TIDX = -1,
+  TIMER0_IDX
+};
 
 void TIMER0_UP_TIMER9_IRQHandler (void)
 {
-    timer_irq_handler(timer_get(TIMER0));
+    _irq_handler(TIMER0, &timers[TIMER0_IDX].cfg);
 }
+
+#endif // TIMER0
+
+#if !IS_TIMER_CLAIMED(TIMER1_BASE)
+
+enum {
+  TIMER1_TIDX = TIMER0_TIDX,
+  TIMER1_IDX
+};
+
+void TIMER1_IRQHandler (void)
+{
+    _irq_handler(TIMER1, &timers[TIMER1_IDX].cfg);
+}
+
+#endif // TIMER1
+
+#if !IS_TIMER_CLAIMED(TIMER2_BASE)
+
+enum {
+  TIMER2_TIDX = TIMER1_TIDX,
+  TIMER2_IDX
+};
+
+void TIMER2_IRQHandler (void)
+{
+    _irq_handler(TIMER2, &timers[TIMER2_IDX].cfg);
+}
+
+#endif // TIMER2
+
+#if !IS_TIMER_CLAIMED(TIMER4_BASE)
+
+enum {
+  TIMER4_TIDX = TIMER2_TIDX,
+  TIMER4_IDX
+};
+
+void TIMER4_IRQHandler (void)
+{
+    _irq_handler(TIMER4, &timers[TIMER4_IDX].cfg);
+}
+
+#endif // TIMER4
+
+#if !IS_TIMER_CLAIMED(TIMER5_BASE)
+
+enum {
+  TIMER5_TIDX = TIMER4_TIDX,
+  TIMER5_IDX
+};
+
+void TIMER5_IRQHandler (void)
+{
+    _irq_handler(TIMER5, &timers[TIMER5_IDX].cfg);
+}
+
+#endif // TIMER5
+
+#if !IS_TIMER_CLAIMED(TIMER6_BASE)
+
+enum {
+  TIMER6_TIDX = TIMER5_TIDX,
+  TIMER6_IDX
+};
+
+void TIMER6_IRQHandler (void)
+{
+    _irq_handler(TIMER6, &timers[TIMER6_IDX].cfg);
+}
+
+#endif // TIMER6
+
+#if !IS_TIMER_CLAIMED(TIMER7_BASE)
+
+enum {
+  TIMER7_TIDX = TIMER6_TIDX,
+  TIMER7_IDX
+};
 
 void TIMER7_UP_TIMER12_IRQHandler (void)
 {
-    timer_irq_handler(timer_get(TIMER7));
+    _irq_handler(TIMER7, &timers[TIMER7_IDX].cfg);
 }
 
-// -----------------------------------------------------------------------------
-// Stepper timer (TIMER3)
-// -----------------------------------------------------------------------------
-
-void stepper_timer_init (void)
-{
-    rcu_timer_clock_prescaler_config(RCU_TIMER_PSC_MUL2);
-    timerCLKEN(STEPPER_TIMER_N);
-
-    timer_parameter_struct init;
-    timer_struct_para_init(&init);
-    init.prescaler = 0;                       // 84 MHz timer clock (APB1 x 2)
-    init.alignedmode = TIMER_COUNTER_EDGE;
-    init.counterdirection = TIMER_COUNTER_UP;
-    init.period = 0xFFFFFFFFU;
-    init.clockdivision = TIMER_CKDIV_DIV1;
-    init.repetitioncounter = 0;
-    timer_init(STEPPER_TIMER, &init);
-
-    nvic_irq_enable(timerINT(STEPPER_TIMER_N), 2U, 0U);
-    timer_interrupt_enable(STEPPER_TIMER, TIMER_INT_UP);
-    timer_enable(STEPPER_TIMER);
-}
-
-void stepper_timer_load (uint32_t ticks)
-{
-    timer_autoreload_value_config(STEPPER_TIMER, ticks);
-    timer_counter_value_config(STEPPER_TIMER, 0);
-    timer_event_software_generate(STEPPER_TIMER, TIMER_EVENT_SRC_UPG);
-}
+#endif // TIMER7
 

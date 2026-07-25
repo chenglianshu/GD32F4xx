@@ -29,7 +29,7 @@
 
 #define BUFLEN 80
 
-#if defined(ESP_PLATFORM) || defined(STM32_PLATFORM) ||  defined(__LPC17XX__) ||  defined(__IMXRT1062__) || defined(__MSP432E401Y__) || defined(GD32F4xx)
+#if defined(ESP_PLATFORM) || defined(STM32_PLATFORM) ||  defined(__LPC17XX__) ||  defined(__IMXRT1062__) || defined(__MSP432E401Y__)
 #define NEW_FATFS
 #endif
 
@@ -58,10 +58,6 @@ static on_realtime_report_ptr on_realtime_report;
 static on_report_options_ptr on_report_options;
 static driver_setup_ptr driver_setup;
 static settings_changed_ptr settings_changed;
-
-SDState                    sd_state = SD_Idle;
-
-hal_sd_t hal_sd;
 
 static void onRealtimeReport (stream_write_ptr stream_write, report_tracking_flags_t report);
 
@@ -161,11 +157,6 @@ FLASHMEM static status_code_t sd_cmd_mount (sys_state_t state, char *args)
     return sdcard_mount() ? Status_OK : Status_SDMountError;
 }
 
-FLASHMEM static status_code_t sd_mount (void)
-{
-    return sdcard_mount() ? Status_OK : Status_SDMountError;
-}
-
 FLASHMEM static status_code_t sd_cmd_unmount (sys_state_t state, char *args)
 {
     return fatfs ? (sdcard_unmount() ? Status_OK : Status_SDMountError) : Status_SDNotMounted;
@@ -257,10 +248,9 @@ FLASHMEM sdcard_events_t *sdcard_init (void)
 {
     PROGMEM static const sys_command_t sdcard_command_list[] = {
         {"FM", sd_cmd_mount, { .noargs = On }, { .str = "mount SD card" } },
-        {"FU", sd_cmd_unmount, { .noargs = On }, { .str = "unmount SD card" } },
-        {"ESP486", sd_cmd_mount, { .noargs = On }, { .str = "mount SD card" } }
+        {"FU", sd_cmd_unmount, { .noargs = On }, { .str = "unmount SD card" } }
     };
-    sd_mount();
+
     static sys_commands_t sdcard_commands = {
         .n_commands = sizeof(sdcard_command_list) / sizeof(sys_command_t),
         .commands = sdcard_command_list
@@ -298,17 +288,6 @@ FLASHMEM FATFS *sdcard_getfs (void)
         sdcard_mount();
 
     return fatfs;
-}
-
-
-FLASHMEM SDState set_sd_state(SDState state) {
-    sd_state = state;
-    return sd_state;
-}
-
-FLASHMEM SDState get_sd_state(void) 
-{
-	return sd_state;
 }
 
 #endif // FS_ENABLE & FS_SDCARD

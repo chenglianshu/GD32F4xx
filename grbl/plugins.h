@@ -250,6 +250,7 @@ extern uint8_t spi_get_byte (void);
 extern uint8_t spi_put_byte (uint8_t byte);
 extern bool spi_read (uint8_t *data, uint16_t size);
 extern bool spi_write (uint8_t *data, uint16_t size);
+extern void spi_set_speed (uint32_t prescaler);
 
 // EEPROM/FRAM:
 

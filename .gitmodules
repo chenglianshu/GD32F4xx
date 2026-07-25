@@ -1,16 +1,54 @@
 [submodule "grbl"]
 	path = grbl
-	url = https://github.com/grblhal/core
+	url = https://github.com/grblHAL/core
+[submodule "eeprom"]
+	path = eeprom
+	url = https://github.com/grblHAL/Plugin_EEPROM
+[submodule "keypad"]
+	path = keypad
+	url = https://github.com/grblHAL/Plugin_I2C_keypad
+[submodule "odometer"]
+	path = odometer
+	url = https://github.com/grblHAL/Plugin_odometer
+[submodule "sdcard"]
+	path = sdcard
+	url = https://github.com/grblHAL/Plugin_SD_card
+[submodule "spindle"]
+	path = spindle
+	url = https://github.com/grblHAL/Plugins_spindle
 [submodule "laser"]
 	path = laser
 	url = https://github.com/grblHAL/Plugins_laser
-[submodule "spindle"]
-	path = laser
-	url = https://github.com/grblHAL/Plugins_spindle		
-[submodule "eeprom"]
-	path = laser
-	url = https://github.com/grblHAL/Plugin_EEPROM
-[submodule "sdcard"]
-	path = laser
-	url = https://github.com/grblHAL/Plugin_SD_card	
-
+[submodule "motors"]
+	path = motors
+	url = https://github.com/grblHAL/Plugins_motor
+[submodule "trinamic"]
+	path = trinamic
+	url = https://github.com/terjeio/Trinamic-library
+[submodule "bluetooth"]
+	path = bluetooth
+	url = https://github.com/grblHAL/Plugins_Bluetooth
+[submodule "embroidery"]
+	path = embroidery
+	url = https://github.com/grblHAL/Plugin_embroidery
+[submodule "networking"]
+	path = networking
+	url = https://github.com/grblHAL/Plugin_networking
+[submodule "encoder"]
+	path = encoder
+	url = https://github.com/grblHAL/Plugin_encoder
+[submodule "fans"]
+	path = fans
+	url = https://github.com/grblHAL/Plugin_fans/
+[submodule "plasma"]
+	path = plasma
+	url = https://github.com/grblHAL/Plugin_plasma/
+[submodule "webui"]
+	path = webui
+	url = https://github.com/grblHAL/Plugin_WebUI/
+[submodule "plugins"]
+	path = plugins
+	url = https://github.com/grblHAL/Plugins_misc/
+[submodule "openpnp"]
+	path = openpnp
+	url = https://github.com/grblHAL/Plugin_OpenPNP/
