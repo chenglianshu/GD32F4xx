@@ -33,6 +33,7 @@
 #include "sleep.h"
 #include "protocol.h"
 #include "machine_limits.h"
+#include "modbus.h"
 
 #ifndef RT_QUEUE_SIZE
 #define RT_QUEUE_SIZE 16 // must be a power of 2
@@ -45,25 +46,30 @@ typedef union {
         uint8_t overflow            :1,
                 comment_parentheses :1,
                 comment_semicolon   :1,
+                keep_rt_commands    :1,
                 unassigned          :5;
     };
 } line_flags_t;
 
 extern void task_execute_on_startup (void);
 
-static uint_fast16_t char_counter = 0;
-static char line[LINE_BUFFER_SIZE]; // Line to be executed. Zero-terminated.
+static struct line {
+    uint_fast16_t pos;
+    line_flags_t flags;
+    char eol;
+    char data[LINE_BUFFER_SIZE];
+} line;
 static char xcommand[LINE_BUFFER_SIZE];
-static bool keep_rt_commands = false;
 
 static void protocol_exec_rt_suspend (sys_state_t state);
 
 // add gcode to execute not originating from normal input stream
 FLASHMEM bool protocol_enqueue_gcode (char *gcode)
 {
-    bool ok = xcommand[0] == '\0' &&
+    bool ok = *xcommand == '\0' &&
                (state_get() == STATE_IDLE || (state_get() & (STATE_ALARM|STATE_JOG|STATE_TOOL_CHANGE))) &&
-                 !((sys.rt_exec_state & (EXEC_MOTION_CANCEL|EXEC_MOTION_CANCEL_FAST)));
+                 !((sys.rt_exec_state & (EXEC_MOTION_CANCEL|EXEC_MOTION_CANCEL_FAST))) &&
+                  strlen(gcode) < sizeof(xcommand);
 
     if(ok && gc_state.file_run)
         ok = gc_state.modal.program_flow != ProgramFlow_Running || strncmp((char *)gcode, "$J=", 3);
@@ -74,45 +80,46 @@ FLASHMEM bool protocol_enqueue_gcode (char *gcode)
     return ok;
 }
 
-FLASHMEM static bool recheck_line (char *line, line_flags_t *flags)
+FLASHMEM static void clear_line (struct line *line)
 {
-    bool keep_rt_commands = false, first_char = true;
+    line->pos = line->flags.value = 0;
+    *line->data = *xcommand = line->eol = '\0';
+}
 
-    flags->value = 0;
+FLASHMEM static void recheck_line (struct line *line)
+{
+    char *data = line->data;
 
-    if(*line != '\0') do {
+    line->flags.value = 0;
 
-        switch(*line) {
+    if(*data) do {
+
+        switch(*data) {
 
             case '$':
             case '[':
-                if(first_char)
-                    keep_rt_commands = true;
+                if(data == line->data)
+                    line->flags.keep_rt_commands = On;
                 break;
 
             case '(':
-                if(!keep_rt_commands && (flags->comment_parentheses = !flags->comment_semicolon))
-                    keep_rt_commands = !hal.driver_cap.no_gcode_message_handling; // Suspend real-time processing of printable command characters.
+                if(!line->flags.keep_rt_commands && (line->flags.comment_parentheses = !line->flags.comment_semicolon))
+                    line->flags.keep_rt_commands = !hal.driver_cap.no_gcode_message_handling; // Suspend real-time processing of printable command characters.
                 break;
 
             case ')':
-                if(!flags->comment_semicolon)
-                    flags->comment_parentheses = keep_rt_commands = false;
+                if(!line->flags.comment_semicolon)
+                    line->flags.comment_parentheses = line->flags.keep_rt_commands = Off;
                 break;
 
             case ';':
-                if(!flags->comment_parentheses) {
-                    keep_rt_commands = false;
-                    flags->comment_semicolon = On;
+                if(!line->flags.comment_parentheses) {
+                    line->flags.keep_rt_commands = Off;
+                    line->flags.comment_semicolon = On;
                 }
                 break;
         }
-
-        first_char = false;
-
-    } while(*++line != '\0');
-
-    return keep_rt_commands;
+    } while(*++data != '\0');
 }
 
 /*
@@ -120,6 +127,8 @@ FLASHMEM static bool recheck_line (char *line, line_flags_t *flags)
 */
 bool protocol_main_loop (void)
 {
+    int32_t c;
+
     if(sys.alarm == Alarm_SelftestFailed) {
         sys.alarm = Alarm_None;
         system_raise_alarm(Alarm_SelftestFailed);
@@ -195,13 +204,7 @@ bool protocol_main_loop (void)
     // This is also where grblHAL idles while waiting for something to do.
     // ---------------------------------------------------------------------------------
 
-    int32_t c;
-    char eol = '\0';
-    line_flags_t line_flags = {0};
-
-    xcommand[0] = '\0';
-    char_counter = 0;
-    keep_rt_commands = false;
+    clear_line(&line);
 
     while(true) {
 
@@ -211,50 +214,48 @@ bool protocol_main_loop (void)
 
             if(c == ASCII_CAN) {
 
-                eol = xcommand[0] = '\0';
-                keep_rt_commands = false;
-                char_counter = line_flags.value = 0;
+                clear_line(&line);
                 gc_state.last_error = Status_OK;
 
-                if (state_get() == STATE_JOG) // Block all other states from invoking motion cancel.
+                if(state_get() == STATE_JOG) // Block all other states from invoking motion cancel.
                     system_set_exec_state_flag(EXEC_MOTION_CANCEL);
 
             } else if(c == ASCII_EOF) {
                 if(grbl.on_file_end)
                     grbl.on_file_end(hal.stream.file, gc_state.last_error);
-            } else if ((c == '\n') || (c == '\r')) { // End of line reached
+            } else if(c == ASCII_LF || c == ASCII_CR) { // End of line reached
 
                 // Check for possible secondary end of line character, do not process as empty line
                 // if part of crlf (or lfcr pair) as this produces a possibly unwanted double response
-                if(char_counter == 0 && eol && eol != c) {
-                    eol = '\0';
+                if(line.pos == 0 && line.eol && line.eol != c) {
+                    line.eol = '\0';
                     continue;
                 } else
-                    eol = (char)c;
+                    line.eol = (char)c;
 
                 if(!protocol_execute_realtime()) // Runtime command check point.
                     return !sys.flags.exit;      // Bail to calling function upon system abort
 
-                line[char_counter] = '\0'; // Set string termination character.
+                line.data[line.pos] = '\0'; // Set string termination character.
 
               #if REPORT_ECHO_LINE_RECEIVED
                 report_echo_line_received(line);
               #endif
 
                 // Direct and execute one line of formatted input, and report status of execution.
-                if (line_flags.overflow) // Report line overflow error.
+                if(line.flags.overflow) // Report line overflow error.
                     gc_state.last_error = Status_Overflow;
-                else if(*line == '\0') // Empty line. For syncing purposes.
+                else if(*line.data == '\0') // Empty line. For syncing purposes.
                     gc_state.last_error = Status_OK;
-                else if(*line == '$') {// grblHAL '$' system command
-                    if((gc_state.last_error = system_execute_line(line)) == Status_LimitsEngaged) {
+                else if(*line.data == '$') {// grblHAL '$' system command
+                    if((gc_state.last_error = system_execute_line(line.data, hal.stream.write)) == Status_LimitsEngaged) {
                         system_raise_alarm(Alarm_LimitsEngaged);
                         grbl.report.feedback_message(Message_CheckLimits);
                     }
-                } else if(*line == '[' && grbl.on_user_command)
-                    gc_state.last_error = grbl.on_user_command(line);
+                } else if(*line.data == '[' && grbl.on_user_command)
+                    gc_state.last_error = grbl.on_user_command(line.data);
                 else if(state_get() & (STATE_ALARM|STATE_ESTOP|STATE_JOG)) { // Everything else is gcode. Block if in alarm, eStop or jog mode.
-                    if(*line == CMD_PROGRAM_DEMARCATION && line[1] == '\0' && (state_get() & (STATE_ALARM|STATE_ESTOP))) {
+                    if(*line.data == CMD_PROGRAM_DEMARCATION && line.data[1] == '\0' && (state_get() & (STATE_ALARM|STATE_ESTOP))) {
                         gc_state.file_run = !gc_state.file_run;
                         gc_state.last_error = Status_OK;
                         if(grbl.on_file_demarcate)
@@ -268,8 +269,8 @@ bool protocol_main_loop (void)
                 else { // Parse and execute g-code block.
 
 #endif
-                    if((gc_state.last_error = gc_execute_block(line)) != Status_OK)
-                        eol = '\0';
+                    if((gc_state.last_error = gc_execute_block(line.data)) != Status_OK)
+                        line.eol = '\0';
                 }
 
                 // Add a short delay for each block processed in Check Mode to
@@ -286,61 +287,60 @@ bool protocol_main_loop (void)
                     grbl.report.status_message(gc_state.last_error);
 
                 // Reset tracking data for next line.
-                keep_rt_commands = false;
-                char_counter = line_flags.value = 0;
+                line.pos = line.flags.value = 0;
 
-            } else if (c != ASCII_BS && c <= (char_counter > 0 ? ' ' - 1 : ' '))
+            } else if(c != ASCII_BS && c <= (line.pos ? ' ' - 1 : ' '))
                 continue; // Strip control characters and leading whitespace.
             else {
                 switch(c) {
 
                     case '$':
                     case '[':
-                        if(char_counter == 0)
-                            keep_rt_commands = true;
+                        if(line.pos == 0)
+                            line.flags.keep_rt_commands = On;
                         break;
 
                     case '(':
-                        if(!keep_rt_commands && (line_flags.comment_parentheses = !line_flags.comment_semicolon))
-                            keep_rt_commands = !hal.driver_cap.no_gcode_message_handling; // Suspend real-time processing of printable command characters.
+                        if(!line.flags.keep_rt_commands && (line.flags.comment_parentheses = !line.flags.comment_semicolon))
+                            line.flags.keep_rt_commands = !hal.driver_cap.no_gcode_message_handling; // Suspend real-time processing of printable command characters.
                         break;
 
                     case ')':
-                        if(!line_flags.comment_semicolon)
-                            line_flags.comment_parentheses = keep_rt_commands = false;
+                        if(!line.flags.comment_semicolon)
+                            line.flags.comment_parentheses = line.flags.keep_rt_commands = Off;
                         break;
 
                     case ';':
-                        if(!line_flags.comment_parentheses) {
-                            keep_rt_commands = false;
-                            line_flags.comment_semicolon = On;
+                        if(!line.flags.comment_parentheses) {
+                            line.flags.keep_rt_commands = Off;
+                            line.flags.comment_semicolon = On;
                         }
                         break;
 
                     case ASCII_BS:
                     case ASCII_DEL:
-                        if(char_counter) {
-                            line[--char_counter] = '\0';
-                            keep_rt_commands = recheck_line(line, &line_flags);
+                        if(line.pos) {
+                            line.data[--line.pos] = '\0';
+                            recheck_line(&line);
                         }
                         continue;
                 }
-                if(!(line_flags.overflow = char_counter >= (LINE_BUFFER_SIZE - 1)))
-                    line[char_counter++] = c;
+                if(!(line.flags.overflow = line.pos >= (LINE_BUFFER_SIZE - 1)))
+                    line.data[line.pos++] = c;
             }
         }
 
         // Handle extra command (internal stream)
-        if(xcommand[0] != '\0') {
+        if(*xcommand) {
 
-            if (xcommand[0] == '$') // grblHAL '$' system command
-                system_execute_line(xcommand);
-            else if (state_get() & (STATE_ALARM|STATE_ESTOP|STATE_JOG)) // Everything else is gcode. Block if in alarm, eStop or jog state.
+            if(*xcommand == '$') // grblHAL '$' system command
+                system_execute_line(xcommand, hal.stream.write);
+            else if(state_get() & (STATE_ALARM|STATE_ESTOP|STATE_JOG)) // Everything else is gcode. Block if in alarm, eStop or jog state.
                 grbl.report.status_message(Status_SystemGClock);
             else // Parse and execute g-code block.
                 gc_execute_block(xcommand);
 
-            xcommand[0] = '\0';
+            *xcommand = '\0';
         }
 
         // If there are no more characters in the input stream buffer to be processed and executed,
@@ -424,19 +424,19 @@ FLASHMEM static void protocol_poll_cmd (void)
 
     if((c = hal.stream.read()) != SERIAL_NO_DATA) {
 
-        if ((c == '\n') || (c == '\r')) { // End of line reached
-            line[char_counter] = '\0';
-            gc_state.last_error = *line == '\0' ? Status_OK : (*line == '$' ? system_execute_line(line) : Status_SystemGClock);
-            char_counter = 0;
-            *line = '\0';
+        if(c == ASCII_LF || c == ASCII_CR) { // End of line reached
+            line.data[line.pos] = '\0';
+            gc_state.last_error = *line.data == '\0' ? Status_OK : (*line.data == '$' ? system_execute_line(line.data, hal.stream.write) : Status_SystemGClock);
+            line.pos = 0;
+            *line.data = '\0';
             grbl.report.status_message(gc_state.last_error);
         } else if(c == ASCII_DEL || c == ASCII_BS) {
-            if(char_counter)
-                line[--char_counter] = '\0';
-        } else if(char_counter == 0 ? c != ' ' : char_counter < (LINE_BUFFER_SIZE - 1))
-            line[char_counter++] = c;
+            if(line.pos)
+                line.data[--line.pos] = '\0';
+        } else if(line.pos == 0 ? c != ' ' : line.pos < (LINE_BUFFER_SIZE - 1))
+            line.data[line.pos++] = c;
 
-        keep_rt_commands = char_counter > 0 && *line == '$';
+        line.flags.keep_rt_commands = line.pos && *line.data == '$';
     }
 }
 
@@ -448,11 +448,12 @@ bool protocol_exec_rt_system (void)
     rt_exec_t rt_exec;
     bool killed = false;
 
-    if (sys.rt_exec_alarm && (rt_exec = system_clear_exec_alarm())) { // Enter only if any bit flag is true
+    if(sys.rt_exec_alarm && (rt_exec = system_clear_exec_alarm())) { // Enter only if any bit flag is true
 
         if((sys.reset_pending = bit_istrue(sys.rt_exec_state, EXEC_RESET))) {
             // Kill spindle and coolant.
             killed = true;
+            modbus_reset(sys.abort);
             spindle_all_off(true);
             hal.coolant.set_state((coolant_state_t){0});
         }
@@ -475,7 +476,8 @@ bool protocol_exec_rt_system (void)
             switch((alarm_code_t)rt_exec) {
 
                 case Alarm_EStop:
-                    grbl.report.feedback_message(Message_EStop);
+                    if(hal.control.get_state().e_stop)
+                        grbl.report.feedback_message(Message_EStop);
                     break;
 
                 case Alarm_MotorFault:
@@ -487,8 +489,7 @@ bool protocol_exec_rt_system (void)
                     break;
             }
 
-            *line = '\0';
-            char_counter = 0;
+    		clear_line(&line);
             hal.stream.reset_read_buffer();
 
             system_clear_exec_state_flag(EXEC_RESET); // Disable any existing reset
@@ -507,7 +508,7 @@ bool protocol_exec_rt_system (void)
                 }
 
                 protocol_poll_cmd();
-                grbl.on_execute_realtime(STATE_ESTOP);
+                task_execute(false);
             }
 
             system_clear_exec_alarm(); // Clear alarm
@@ -516,27 +517,33 @@ bool protocol_exec_rt_system (void)
         }
     }
 
-    if (sys.rt_exec_state && (rt_exec = system_clear_exec_states())) { // Get and clear volatile sys.rt_exec_state atomically.
+    if(sys.rt_exec_state && (rt_exec = system_clear_exec_states())) { // Get and clear volatile sys.rt_exec_state atomically.
 
         // Execute system abort.
         if((sys.reset_pending = bit_istrue(rt_exec, EXEC_RESET))) {
 
+            alarm_code_t alarm;
+
+            // Only place sys.abort is set true, when E-stop is not asserted.
+            if(!(sys.abort = !hal.control.get_state().e_stop))
+                alarm = Alarm_EStop;
+            else if(hal.control.get_state().motor_fault) {
+                sys.abort = false;
+                alarm = Alarm_MotorFault;
+            } else
+                alarm = Alarm_None;
+
             if(!killed) {
                 // Kill spindle and coolant.
+                modbus_reset(sys.abort);
                 spindle_all_off(true);
                 hal.coolant.set_state((coolant_state_t){0});
             }
 
-            // Only place sys.abort is set true, when E-stop is not asserted.
-            if(!(sys.abort = !hal.control.get_state().e_stop)) {
+            if(alarm) {
                 hal.stream.reset_read_buffer();
-                system_raise_alarm(Alarm_EStop);
-                grbl.report.feedback_message(Message_EStop);
-            } else if(hal.control.get_state().motor_fault) {
-                sys.abort = false;
-                hal.stream.reset_read_buffer();
-                system_raise_alarm(Alarm_MotorFault);
-                grbl.report.feedback_message(Message_MotorFault);
+                system_raise_alarm(alarm);
+                grbl.report.feedback_message(alarm == Alarm_EStop ? Message_EStop : Alarm_MotorFault);
             }
 
             if(!killed) // Tell driver/plugins about reset.
@@ -558,6 +565,8 @@ bool protocol_exec_rt_system (void)
 
             gc_state.tool_change = false;
 
+            modbus_reset(sys.abort);
+
             // Tell driver/plugins about reset.
             hal.driver_reset();
 
@@ -577,7 +586,7 @@ bool protocol_exec_rt_system (void)
 
                 do {
                     st_prep_buffer(); // Check and prep segment buffer.
-                    grbl.on_execute_realtime(state_get());
+                    task_execute(false);
                 } while(st_is_stepping());
 
                 rt_exec |= system_clear_exec_states();
@@ -601,7 +610,7 @@ bool protocol_exec_rt_system (void)
         }
 
         // Execute and print status to output stream
-        if (rt_exec & EXEC_STATUS_REPORT)
+        if(rt_exec & EXEC_STATUS_REPORT)
             report_realtime_status(hal.stream.write_all, &hal.stream.report);
 
         if(rt_exec & EXEC_GCODE_REPORT)
@@ -624,7 +633,7 @@ bool protocol_exec_rt_system (void)
             state_update(rt_exec);
     }
 
-    grbl.on_execute_realtime(state_get());
+    task_execute(false);
 
     // Execute overrides.
 
@@ -667,6 +676,10 @@ bool protocol_exec_rt_system (void)
 
                 case CMD_OVERRIDE_RAPID_LOW:
                     new_r_override = RAPID_OVERRIDE_LOW;
+                    break;
+
+                case CMD_OVERRIDE_RAPID_EXTRA_LOW:
+                    new_r_override = RAPID_OVERRIDE_EXTRA_LOW;
                     break;
             }
 
@@ -785,8 +798,7 @@ bool protocol_exec_rt_system (void)
 FLASHMEM static void protocol_exec_rt_suspend (sys_state_t state)
 {
     if((sys.blocking_event = state == STATE_SLEEP)) {
-        *line = '\0';
-        char_counter = 0;
+		clear_line(&line);
         hal.stream.reset_read_buffer();
     }
 
@@ -830,20 +842,20 @@ ISR_CODE bool ISR_FUNC(protocol_enqueue_realtime_command)(uint8_t c)
     // Characters with functions assigned are always acted upon even when the input stream
     // is redirected to a non-interactive stream such as from a SD card.
 
-    switch ((unsigned char)c) {
+    switch((unsigned char)c) {
 
         case '\n':
         case '\r':
             break;
 
         case '$':
-            if(char_counter == 0)
-                keep_rt_commands = !settings.flags.legacy_rt_commands;
+            if(line.pos == 0)
+                line.flags.keep_rt_commands = !settings.flags.legacy_rt_commands;
             break;
 
         case CMD_STOP:
             system_set_exec_state_flag(EXEC_STOP);
-            char_counter = 0;
+        	clear_line(&line);
             hal.stream.cancel_read_buffer();
             drop = true;
             break;
@@ -870,8 +882,10 @@ ISR_CODE bool ISR_FUNC(protocol_enqueue_realtime_command)(uint8_t c)
 
         case CMD_STATUS_REPORT:
         case 0x05:
-            if(!sys.flags.auto_reporting)
+            if(!sys.flags.auto_reporting) {
+                hal.stream.report.flags.extended = settings.status_report.extended;
                 system_set_exec_state_flag(EXEC_STATUS_REPORT);
+            }
             drop = true;
             break;
 
@@ -892,11 +906,11 @@ ISR_CODE bool ISR_FUNC(protocol_enqueue_realtime_command)(uint8_t c)
             break;
 
         case CMD_JOG_CANCEL:
-            char_counter = 0;
             drop = true;
+            clear_line(&line);
             hal.stream.cancel_read_buffer();
 #ifdef KINEMATICS_API // needed when kinematics algorithm segments long jog distances (as it blocks reading from input stream)
-            if (state_get() & STATE_JOG) // Block all other states from invoking motion cancel.
+            if(state_get() & STATE_JOG) // Block all other states from invoking motion cancel.
                 system_set_exec_state_flag(EXEC_MOTION_CANCEL);
 #endif
             if(grbl.on_jog_cancel)
@@ -929,13 +943,18 @@ ISR_CODE bool ISR_FUNC(protocol_enqueue_realtime_command)(uint8_t c)
             break;
 
         case CMD_MPG_MODE_TOGGLE:           // Switch off MPG mode
-            if((drop = hal.stream.type == StreamType_MPG))
+            if((drop = hal.stream.state.is_mpg))
                 task_add_immediate(stream_mpg_set_mode, NULL);
             break;
 
         case CMD_AUTO_REPORTING_TOGGLE:
             if((drop = settings.report_interval != 0))
                 sys.flags.auto_reporting = !sys.flags.auto_reporting;
+            break;
+
+        case CMD_SOFT_ESTOP:
+            sys.flags.soft_estop = drop = true;
+            hal.control.interrupt_callback((control_signals_t){ .e_stop = On });
             break;
 
         case CMD_OVERRIDE_FEED_RESET:
@@ -946,6 +965,7 @@ ISR_CODE bool ISR_FUNC(protocol_enqueue_realtime_command)(uint8_t c)
         case CMD_OVERRIDE_RAPID_RESET:
         case CMD_OVERRIDE_RAPID_MEDIUM:
         case CMD_OVERRIDE_RAPID_LOW:
+        case CMD_OVERRIDE_RAPID_EXTRA_LOW:
             drop = true;
             enqueue_feed_override(c);
             break;
@@ -967,43 +987,48 @@ ISR_CODE bool ISR_FUNC(protocol_enqueue_realtime_command)(uint8_t c)
             enqueue_coolant_override((uint8_t)c);
             break;
 
+        case ASCII_BS:
+        case ASCII_DEL:
+            drop = !!hal.stream.file; // Editing file streams is not allowed. TODO: Somehow add redirected streams.
+            break;
+
         case CMD_REBOOT:
             if(esc && hal.reboot)
                 hal.reboot(); // Force MCU reboot. This call should never return.
             break;
 
         default:
-            if(((unsigned char)c < ' ' && c != ASCII_BS) || ((unsigned char)c > ASCII_DEL && (unsigned char)c <= 0xBF))
+            if((unsigned char)c < ' ' || ((unsigned char)c > ASCII_DEL && (unsigned char)c <= 0xBF))
                 drop = grbl.on_unknown_realtime_cmd == NULL || grbl.on_unknown_realtime_cmd(c);
             break;
     }
 
     // 2. Process printable ASCII characters and top-bit set characters
     //    If legacy realtime commands are disabled they are returned to the input stream
-    //    when appearing in settings ($ commands) or comments
+    //    when appearing in settings ($ commands) or comments.
 
-    if(!drop) switch ((unsigned char)c) {
+    if(!drop) switch((unsigned char)c) {
 
         case CMD_STATUS_REPORT_LEGACY:
-            if(!keep_rt_commands || settings.flags.legacy_rt_commands) {
+            if(!line.flags.keep_rt_commands || settings.flags.legacy_rt_commands) {
                 system_set_exec_state_flag(EXEC_STATUS_REPORT);
                 drop = true;
             }
             break;
 
         case CMD_CYCLE_START_LEGACY:
-            signals.cycle_start = !keep_rt_commands || settings.flags.legacy_rt_commands;
+            signals.cycle_start = !line.flags.keep_rt_commands || settings.flags.legacy_rt_commands;
             break;
 
         case CMD_FEED_HOLD_LEGACY:
-            if(!keep_rt_commands || settings.flags.legacy_rt_commands) {
+            if(!line.flags.keep_rt_commands || settings.flags.legacy_rt_commands) {
                 system_set_exec_state_flag(EXEC_FEED_HOLD);
                 drop = true;
             }
             break;
 
         default: // Drop top bit set characters
-            drop = !(keep_rt_commands || (unsigned char)c < 0x7F);
+            drop = !(line.flags.keep_rt_commands || (unsigned char)c <= 0x7F);
             break;
     }
 

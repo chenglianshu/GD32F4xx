@@ -23,6 +23,7 @@
 #include <string.h>
 
 #include "hal.h"
+#include "modbus.h"
 #include "protocol.h"
 #include "task.h"
 #include "state_machine.h"
@@ -33,6 +34,10 @@
 #ifndef DEBUG_BUFFER
 #define DEBUG_BUFFER 100
 #endif
+#endif
+
+#ifndef MPG_BUFFER_SIZE
+#define MPG_BUFFER_SIZE 128  // must be a power of 2
 #endif
 
 DCRAM static stream_rx_buffer_t rxbackup;
@@ -59,6 +64,17 @@ typedef struct stream_connection {
     struct stream_connection *next, *prev;
 } stream_connection_t;
 
+#if MPG_BUFFER_SIZE
+
+typedef struct {
+    volatile uint_fast16_t head;
+    uint8_t eol;
+    uint8_t data[MPG_BUFFER_SIZE];
+    char input[MPG_BUFFER_SIZE];
+} stream_mpg_buffer_t;
+
+#endif
+
 PROGMEM static const io_stream_properties_t null_stream = {
     .type = StreamType_Null,
     .instance = 0,
@@ -80,6 +96,9 @@ static struct {
     io_stream_t stream;
     stream_write_char_ptr write_char;
     stream_connection_flags_t flags;
+#if MPG_BUFFER_SIZE
+    stream_mpg_buffer_t *rx_buf;
+#endif
     on_rt_reports_added_ptr on_rt_reports_added;
     on_gcode_mode_changed_ptr on_gcode_mode_changed;
 } mpg;
@@ -116,13 +135,7 @@ FLASHMEM bool stream_enumerate_streams (stream_enumerate_callback_ptr callback, 
 // TODO: Restructure st_prep_buffer() calls to be executed here during a long print.
 bool stream_tx_blocking (void)
 {
-    static volatile bool lock = false;
-
-    if(!lock) {
-        lock = true;
-        grbl.on_execute_realtime(state_get());
-        lock = false;
-    }
+    task_execute(false);
 
     return !(sys.rt_exec_state & EXEC_RESET);
 }
@@ -206,7 +219,7 @@ FLASHMEM bool stream_await_tx_clear (const io_stream_t *stream)
 {
     if(stream->get_tx_buffer_count) {
         while(stream->get_tx_buffer_count())
-            grbl.on_execute_realtime(state_get());
+            task_execute(false);
     }
 
     return !!stream->get_tx_buffer_count;
@@ -219,7 +232,7 @@ ISR_CODE bool ISR_FUNC(stream_buffer_all)(uint8_t c)
 
 ISR_CODE bool ISR_FUNC(stream_enqueue_realtime_command)(uint8_t c)
 {
-	bool drop = hal.stream.enqueue_rt_command ? hal.stream.enqueue_rt_command(c) : protocol_enqueue_realtime_command(c);
+    bool drop = hal.stream.enqueue_rt_command ? hal.stream.enqueue_rt_command(c) : protocol_enqueue_realtime_command(c);
 
     if(drop && (c == CMD_CYCLE_START || c == CMD_CYCLE_START_LEGACY) && state_get() == STATE_IDLE)
         report_add_realtime(Report_CycleStart);
@@ -267,7 +280,7 @@ static void stream_write_all (const char *s)
     stream_connection_t *connection = connections;
 
     while(connection) {
-        if(connection->is_up())
+        if(connection->is_up() && !(sys.flags.mpg_auto_reporting && connection->stream == &mpg.stream))
             connection->stream->write(s);
         connection = connection->next;
     }
@@ -294,9 +307,10 @@ FLASHMEM static stream_connection_t *add_connection (const io_stream_t *stream)
         last->next = connection;
     }
 
-    connection->is_up = stream->is_connected ?
-                         stream->is_connected :
-                          (stream->state.is_usb && base.stream != stream ? is_not_connected : stream_connected);
+    if(connection)
+        connection->is_up = stream->is_connected ?
+                             stream->is_connected :
+                              (stream->state.is_usb && base.stream != stream ? is_not_connected : stream_connected);
 
     return connection;
 }
@@ -339,31 +353,31 @@ FLASHMEM static bool stream_select (const io_stream_t *stream, bool add)
     if(!add) { // disconnect
 
         if(stream == base.stream || stream == &mpg.stream)
-        	return false;
+            return false;
 
         bool disconnected = false;
         stream_connection_t *connection = connections->next;
 
         while(connection) {
-        	if(stream == connection->stream) {
-        		if((connection->prev->next = connection->next))
-        			connection->next->prev = connection->prev;
+            if(stream == connection->stream) {
+                if((connection->prev->next = connection->next))
+                    connection->next->prev = connection->prev;
                 if((stream = connection->prev->stream) == &mpg.stream) {
-                	mpg_enable = mpg.flags.mpg_control;
-                	if((stream = connection->prev->prev->stream) == NULL)
-                		stream = base.stream;
+                    mpg_enable = mpg.flags.mpg_control;
+                    if((stream = connection->prev->prev->stream) == NULL)
+                        stream = base.stream;
                 }
                 free(connection);
-        		connection = NULL;
-        		disconnected = true;
-        	} else
-        		connection = connection->next;
+                connection = NULL;
+                disconnected = true;
+            } else
+                connection = connection->next;
         }
 
         if(!disconnected)
-        	return false;
+            return false;
 
-	} else if(add_connection(stream) == NULL)
+    } else if(add_connection(stream) == NULL)
         return false;
 
     switch(stream->type) {
@@ -399,11 +413,11 @@ FLASHMEM static bool stream_select (const io_stream_t *stream, bool add)
             break;
     }
 
-    if(hal.stream.type == StreamType_MPG) {
+    if(hal.stream.state.is_mpg) {
         stream_mpg_enable(false);
         mpg.flags.mpg_control = On;
     } else if(mpg_enable)
-		task_add_immediate(stream_mpg_set_mode, (void *)1);
+        task_add_immediate(stream_mpg_set_mode, (void *)1);
 
     memcpy(&hal.stream, stream, offsetof(io_stream_t, report));
 
@@ -426,7 +440,7 @@ FLASHMEM static bool stream_select (const io_stream_t *stream, bool add)
         hal.stream.disable_rx(false);
 
     if(grbl.on_stream_changed)
-        grbl.on_stream_changed(hal.stream.type);
+        grbl.on_stream_changed();
 
     active_stream = stream;
 
@@ -541,7 +555,10 @@ FLASHMEM bool stream_close (io_stream_t const *stream)
                 if(details->streams[idx].release) {
                     if(stream->disable_rx)
                         stream->disable_rx(true);
-                    released = details->streams[idx].release(stream->instance);
+                    if((released = details->streams[idx].release(stream->instance))) {
+                        if(stream->file)
+                            vfs_close(stream->file);
+                    }
                 }
                 break;
             }
@@ -549,6 +566,20 @@ FLASHMEM bool stream_close (io_stream_t const *stream)
     } while((details = details->next));
 
     return released;
+}
+
+FLASHMEM void stream_set_file (vfs_file_t *file, stream_read_ptr read)
+{
+    if(!(hal.stream.file = file))
+        gc_state.file_stream = false;
+
+    if(read)
+        hal.stream.read = read;
+}
+
+FLASHMEM bool stream_is_file (void)
+{
+    return !!hal.stream.file;
 }
 
 // UART style streams
@@ -585,12 +616,21 @@ ISR_CODE static void mpg_rt_report_add (report_tracking_flags_t report)
         mpg.stream.report.flags.value |= report.value;
 }
 
+FLASHMEM static void mpg_auto_report (void *data)
+{
+    if(settings.mpg_report_interval) {
+        task_add_delayed(mpg_auto_report, NULL, settings.mpg_report_interval);
+
+    report_realtime_status(mpg.stream.write, &mpg.stream.report);
+    }
+}
+
 FLASHMEM static void mpg_gcode_mode_changed (void)
 {
     if(mpg.on_gcode_mode_changed)
         mpg.on_gcode_mode_changed();
 
-    if(hal.stream.type != StreamType_MPG)
+    if(!hal.stream.state.is_mpg)
         report_gcode_modes(mpg.stream.write);
 }
 
@@ -603,10 +643,27 @@ static void stream_mpg_write (void *cmd)
 {
     switch((uintptr_t)cmd) {
 
+#if MPG_BUFFER_SIZE
+        case ASCII_LF:
+            {
+                status_code_t status;
+                if((status = *mpg.rx_buf->input == '$' ? system_execute_line(mpg.rx_buf->input, mpg.stream.write) : (*mpg.rx_buf->input ? Status_AccessDenied : Status_OK)) == Status_OK)
+                    mpg.stream.write("ok" ASCII_EOL);
+                else {
+                    mpg.stream.write("error:");
+                    mpg.stream.write(uitoa(status));
+                    mpg.stream.write(ASCII_EOL);
+                }
+            }
+            break;
+#endif
         case CMD_STATUS_REPORT_ALL:
             mpg.stream.report.flags.value = report_get_rt_flags_all().value;
             // no break
         case CMD_STATUS_REPORT:
+            if(!mpg.stream.report.flags.all)
+                mpg.stream.report.flags.extended = settings.status_report.extended;
+            // no break
         case CMD_STATUS_REPORT_LEGACY:
             report_realtime_status(mpg.stream.write, &mpg.stream.report);
             break;
@@ -634,8 +691,28 @@ ISR_CODE bool ISR_FUNC(stream_mpg_check_enable)(uint8_t c)
             break;
 
         default:
-            protocol_enqueue_realtime_command(c);
-            if((c == CMD_CYCLE_START || c == CMD_CYCLE_START_LEGACY) && state_get() == STATE_IDLE)
+            if(!protocol_enqueue_realtime_command(c)) {
+#if MPG_BUFFER_SIZE
+                if(mpg.rx_buf) {
+
+                    uint16_t next_head = (mpg.rx_buf->head + 1) & (MPG_BUFFER_SIZE - 1);
+
+                    if(c == ASCII_LF || c == ASCII_CR) {
+                        mpg.rx_buf->eol = mpg.rx_buf->eol && c != mpg.rx_buf->eol ? '\0' : c;
+                        c = '\0';
+                    } else
+                        mpg.rx_buf->eol = '\0';
+
+                    if((mpg.rx_buf->data[mpg.rx_buf->head] = c))
+                        mpg.rx_buf->head = next_head;
+                    else if(mpg.rx_buf->eol) {
+                        mpg.rx_buf->head = 0;
+                        strcpy(mpg.rx_buf->input, (char *)mpg.rx_buf->data);
+                        task_add_immediate(stream_mpg_write, (void *)((uintptr_t)ASCII_LF));
+                    }
+                }
+#endif
+            } else if((c == CMD_CYCLE_START || c == CMD_CYCLE_START_LEGACY) && state_get() == STATE_IDLE)
                 report_add_realtime(Report_CycleStart);
             break;
     }
@@ -652,8 +729,6 @@ FLASHMEM bool stream_mpg_register (const io_stream_t *stream, bool rx_only, stre
 
     memcpy(&mpg.stream, stream, sizeof(io_stream_t));
 
-    mpg.write_char = write_char;
-
     if(stream->write == NULL || rx_only) {
 
         mpg.stream.is_connected = stream_connected;
@@ -664,8 +739,8 @@ FLASHMEM bool stream_mpg_register (const io_stream_t *stream, bool rx_only, stre
         if(grbl.on_mpg_registered)
             grbl.on_mpg_registered(&mpg.stream, false);
 
-        if(mpg.write_char)
-            mpg.stream.set_enqueue_rt_handler(mpg.write_char);
+        if(write_char)
+            mpg.stream.set_enqueue_rt_handler(write_char);
 
         return true;
     }
@@ -677,8 +752,11 @@ FLASHMEM bool stream_mpg_register (const io_stream_t *stream, bool rx_only, stre
         mpg.flags.is_mpg_tx = On;
         mpg.flags.mpg_control = Off;
 
-        if(mpg.write_char)
-            mpg.stream.set_enqueue_rt_handler(mpg.write_char);
+#if MPG_BUFFER_SIZE
+        mpg.rx_buf = calloc(1, sizeof(stream_mpg_buffer_t));
+#endif
+        if(write_char)
+            mpg.stream.set_enqueue_rt_handler(write_char);
         else
             mpg.stream.disable_rx(true);
 
@@ -694,6 +772,8 @@ FLASHMEM bool stream_mpg_register (const io_stream_t *stream, bool rx_only, stre
 
         if(grbl.on_mpg_registered)
             grbl.on_mpg_registered(&mpg.stream, true);
+
+        task_add_delayed(mpg_auto_report, NULL, 2000);
     }
 
     return connection != NULL;
@@ -704,32 +784,55 @@ FLASHMEM static void report_mpg_mode (void *data)
     protocol_enqueue_realtime_command((uint8_t)((uintptr_t)data));
 }
 
+FLASHMEM bool stream_is_busy (bool is_connected)
+{
+    sys_state_t state = state_get();
+
+    if(is_connected) {
+        if(stream_is_uart(hal.stream.type)) {
+            const io_stream_status_t *status;
+            if((status = stream_get_uart_status(hal.stream.instance))) {
+                is_connected = status->last_status_request && hal.get_elapsed_ticks() - status->last_status_request < 5000;
+            } else
+                is_connected = false;
+        } else
+            is_connected = hal.stream.is_connected();
+    }
+
+    return is_connected || gc_state.file_run || !(state == STATE_IDLE || (state & (STATE_ALARM|STATE_ESTOP)));
+}
+
+FLASHMEM bool stream_mpg_set_baud (uint8_t baud)
+{
+    PROGMEM static const uint32_t rate[] = { 38400, 115200, 230400, 460800, 576000, 921600 }; // this array must match the $720 setting options
+
+    return mpg.stream.set_baud_rate && baud < (sizeof(rate) / sizeof(uint32_t)) && mpg.stream.set_baud_rate(rate[baud]);
+}
+
 FLASHMEM bool stream_mpg_enable (bool on)
 {
     static io_stream_t org_stream = {
-        .type = StreamType_Redirected
+        .type = StreamType_Null
     };
 
     if(mpg.stream.read == NULL)
         return false;
 
-    sys_state_t state = state_get();
-
     // Deny entering MPG mode if busy
-    if(on == sys.mpg_mode || (on && (gc_state.file_run || !(state == STATE_IDLE || (state & (STATE_ALARM|STATE_ESTOP)))))) {
+    if(on == sys.mpg_mode || (on && stream_is_busy(false))) {
         task_add_delayed(report_mpg_mode, (void *)CMD_STATUS_REPORT_ALL, 5);
         return false;
     }
 
     if(on) {
-        if(org_stream.type == StreamType_Redirected) {
+        if(org_stream.type == StreamType_Null) {
             memcpy(&org_stream, &hal.stream, sizeof(io_stream_t));
             if(hal.stream.disable_rx)
                 hal.stream.disable_rx(true);
-            hal.stream.type = StreamType_MPG;
+            hal.stream.state.is_mpg = On;
             hal.stream.read = mpg.stream.read;
             mpg.stream.disable_rx(false);
-            mpg.stream.set_enqueue_rt_handler(hal.stream.set_enqueue_rt_handler(NULL));
+            mpg.write_char = mpg.stream.set_enqueue_rt_handler(hal.stream.set_enqueue_rt_handler(NULL));
             if(mpg.flags.is_mpg_tx) {
                 hal.stream.write = mpg.stream.write;
                 hal.stream.write_n = mpg.stream.write_n;
@@ -740,9 +843,9 @@ FLASHMEM bool stream_mpg_enable (bool on)
             hal.stream.cancel_read_buffer = mpg.stream.cancel_read_buffer;
             hal.stream.reset_read_buffer = mpg.stream.reset_read_buffer;
         }
-    } else if(org_stream.type != StreamType_Redirected) {
+    } else if(org_stream.type != StreamType_Null) {
         memcpy(&hal.stream, &org_stream, offsetof(io_stream_t, report));
-        org_stream.type = StreamType_Redirected;
+        org_stream.type = StreamType_Null;
         mpg.stream.report.override_counter = mpg.stream.report.wco_counter = 0;
         if(hal.stream.disable_rx)
             hal.stream.disable_rx(false);

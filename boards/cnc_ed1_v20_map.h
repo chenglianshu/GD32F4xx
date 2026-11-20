@@ -94,12 +94,22 @@
 #define AUXOUTPUT0_PIN          0
 #define AUXOUTPUT1_PORT         GPIOA // Beeper
 #define AUXOUTPUT1_PIN          8
+#if !USB_SERIAL_CDC
+// PA12 is USB_DP when USB_SERIAL_CDC is enabled: AUXOUTPUT2 and AUXOUTPUT4
+// (and the coolant outputs derived from the latter) only exist on USB-less
+// builds. TODO: move LED and coolant to their real pins once the schematic
+// is confirmed, and split flood/mist onto separate pins (they currently
+// share one pin, so M7+M8 together do not work).
 #define AUXOUTPUT2_PORT         GPIOA // LED
 #define AUXOUTPUT2_PIN          12
 #define AUXOUTPUT3_PORT         GPIOA // Spindle PWM
 #define AUXOUTPUT3_PIN          10
 #define AUXOUTPUT4_PORT         GPIOA // Coolant flood/mist
 #define AUXOUTPUT4_PIN          11
+#else
+#define AUXOUTPUT3_PORT         GPIOA // Spindle PWM
+#define AUXOUTPUT3_PIN          10
+#endif
 #define AUXOUTPUT5_PORT         GPIOB // Generic aux
 #define AUXOUTPUT5_PIN          1
 #define AUXOUTPUT6_PORT         GPIOB // Generic aux
@@ -116,11 +126,12 @@
 #endif
 
 // Define flood and mist coolant enable output pins.
-#if COOLANT_ENABLE & COOLANT_FLOOD
+// Not available when USB_SERIAL_CDC owns PA11 (see AUXOUTPUT4 note above).
+#if (COOLANT_ENABLE & COOLANT_FLOOD) && defined(AUXOUTPUT4_PORT)
 #define COOLANT_FLOOD_PORT      AUXOUTPUT4_PORT
 #define COOLANT_FLOOD_PIN       AUXOUTPUT4_PIN
 #endif
-#if COOLANT_ENABLE & COOLANT_MIST
+#if (COOLANT_ENABLE & COOLANT_MIST) && defined(AUXOUTPUT4_PORT)
 #define COOLANT_MIST_PORT       AUXOUTPUT4_PORT
 #define COOLANT_MIST_PIN        AUXOUTPUT4_PIN
 #endif
@@ -129,26 +140,32 @@
 #define AUXINPUT0_PIN           8
 #define AUXINPUT1_PORT          GPIOB // Probe
 #define AUXINPUT1_PIN           15
-#define AUXINPUT2_PORT          GPIOB // Reset/EStop
-#define AUXINPUT2_PIN           12
-#define AUXINPUT3_PORT          GPIOB // Feed hold
-#define AUXINPUT3_PIN           13
-#define AUXINPUT4_PORT          GPIOB // Cycle start
-#define AUXINPUT4_PIN           14
+// NOTE: PB12/PB13/PB14 control inputs (reset/feed hold/cycle start) are NOT
+// wired on this board - the connector is left unconnected. Declaring them made
+// the floating lines generate phantom control events (an ever-asserted cycle
+// start and noise-triggered feed holds, e.g. after settings writes / during the
+// flash erase stall). Uncomment when the buttons are actually connected.
+//#define AUXINPUT2_PORT          GPIOB // Reset/EStop
+//#define AUXINPUT2_PIN           12
+//#define AUXINPUT3_PORT          GPIOB // Feed hold
+//#define AUXINPUT3_PIN           13
+//#define AUXINPUT4_PORT          GPIOB // Cycle start
+//#define AUXINPUT4_PIN           14
 
 // Define user-control controls (cycle start, reset, feed hold) input pins.
-#if CONTROL_ENABLE & CONTROL_HALT
-#define RESET_PORT              AUXINPUT2_PORT
-#define RESET_PIN               AUXINPUT2_PIN
-#endif
-#if CONTROL_ENABLE & CONTROL_FEED_HOLD
-#define FEED_HOLD_PORT          AUXINPUT3_PORT
-#define FEED_HOLD_PIN           AUXINPUT3_PIN
-#endif
-#if CONTROL_ENABLE & CONTROL_CYCLE_START
-#define CYCLE_START_PORT        AUXINPUT4_PORT
-#define CYCLE_START_PIN         AUXINPUT4_PIN
-#endif
+// Not fitted on this board - see the AUXINPUT2/3/4 note above.
+//#if CONTROL_ENABLE & CONTROL_HALT
+//#define RESET_PORT              AUXINPUT2_PORT
+//#define RESET_PIN               AUXINPUT2_PIN
+//#endif
+//#if CONTROL_ENABLE & CONTROL_FEED_HOLD
+//#define FEED_HOLD_PORT          AUXINPUT3_PORT
+//#define FEED_HOLD_PIN           AUXINPUT3_PIN
+//#endif
+//#if CONTROL_ENABLE & CONTROL_CYCLE_START
+//#define CYCLE_START_PORT        AUXINPUT4_PORT
+//#define CYCLE_START_PIN         AUXINPUT4_PIN
+//#endif
 
 #if PROBE_ENABLE
 #define PROBE_PORT              AUXINPUT1_PORT

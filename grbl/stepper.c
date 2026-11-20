@@ -64,20 +64,22 @@ DCRAM static st_block_t st_block_buffer[SEGMENT_BUFFER_SIZE - 1];
 // algorithm to execute, which are "checked-out" incrementally from the first block in the
 // planner buffer. Once "checked-out", the steps in the segments buffer cannot be modified by
 // the planner, where the remaining planner block steps still can.
-DCRAM static segment_t segment_buffer[SEGMENT_BUFFER_SIZE];
+DCRAM static struct {
+    volatile segment_t *head;
+    volatile segment_t *tail;
+    segment_t segments[SEGMENT_BUFFER_SIZE];
+} segment_buffer;
+
+#if MAX_AMASS_LEVEL > 1
+
+static struct {
+    uint32_t level[MAX_AMASS_LEVEL];
+} amass;
+
+#endif
 
 // Stepper ISR data struct. Contains the running data for the main stepper ISR.
 static stepper_t st = {};
-
-#if ADAPTIVE_MULTI_AXIS_STEP_SMOOTHING
-typedef struct {
-    uint32_t level_1;
-    uint32_t level_2;
-    uint32_t level_3;
-} amass_t;
-
-static amass_t amass;
-#endif
 
 // Used for blocking new segments being added to the seqment buffer until deceleration starts
 // when fast stop is called for. TODO: it is likely that this flag can be removed - more testing required.
@@ -86,14 +88,11 @@ static volatile bool exec_fast_hold = false;
 // Stepper timer ticks per minute
 static float cycles_per_min;
 
-// Step segment ring buffer pointers
-static volatile segment_t *segment_buffer_tail, *segment_buffer_head;
-
 // Pointers for the step segment being prepped from the planner buffer. Accessed only by the
 // main program. Pointers may be planning segments or planner blocks ahead of what being executed.
-static plan_block_t *pl_block;     // Pointer to the planner block being prepped
-static st_block_t *st_prep_block;  // Pointer to the stepper block data being prepped
-static st_block_t st_hold_block;   // Copy of stepper block data for block put on hold during parking
+static plan_block_t *pl_block;      // Pointer to the planner block being prepped
+static st_block_t *st_prep_block;   // Pointer to the stepper block data being prepped
+static st_block_t st_hold_block;    // Copy of stepper block data for block put on hold during parking
 
 // Segment preparation data struct. Contains all the necessary information to compute new segments
 // based on the current executing planner block.
@@ -276,6 +275,21 @@ ISR_CODE void ISR_FUNC(st_go_idle)(void)
         }
     } else
         hal.stepper.enable(settings.steppers.idle_lock_time == 255 ? (axes_signals_t){AXES_BITMASK} : settings.steppers.energize, true);
+}
+
+// Set synced I/O outputs
+FLASHMEM static void ioport_out (void *data)
+{
+    output_command_t *cmd = data;
+
+    do {
+        if(cmd->is_digital)
+            ioport_digital_out(cmd->port, cmd->value != 0.0f);
+        else
+            ioport_analog_out(cmd->port, cmd->value);
+    } while((cmd = cmd->next));
+
+    gc_clear_output_commands(data);
 }
 
 bool st_is_stepping (void)
@@ -476,10 +490,10 @@ ISR_CODE void ISR_FUNC(stepper_driver_interrupt_handler)(void)
     // If there is no step segment, attempt to pop one from the stepper buffer
     if(st.exec_segment == NULL) {
         // Anything in the buffer? If so, load and initialize next step segment.
-        if(segment_buffer_tail != segment_buffer_head) {
+        if(segment_buffer.tail != segment_buffer.head) {
 
             // Initialize new step segment.
-            st.exec_segment = (segment_t *)segment_buffer_tail;
+            st.exec_segment = (segment_t *)segment_buffer.tail;
 
             // Initialize step segment timing per step.
             if(st.exec_segment->cycles_per_tick != cycles_per_tick)
@@ -507,62 +521,55 @@ ISR_CODE void ISR_FUNC(stepper_driver_interrupt_handler)(void)
                 if(st.exec_block->overrides.sync)
                     sys.override.control = st.exec_block->overrides;
 
-                // Execute output commands to be synchronized with motion
-                while(st.exec_block->output_commands) {
-                    output_command_t *cmd = st.exec_block->output_commands;
-                    if(cmd->is_digital)
-                        ioport_digital_out(cmd->port, cmd->value != 0.0f);
-                    else
-                        ioport_analog_out(cmd->port, cmd->value);
-                    st.exec_block->output_commands = cmd->next;
+                // Execute output commands to be synchronized with motion in the foreground
+                if(st.exec_block->output_commands) {
+                    task_add_immediate(ioport_out, (void *)st.exec_block->output_commands);
+                    st.exec_block->output_commands = NULL;
                 }
 
                 // Enqueue any message to be printed (by foreground process)
                 if(st.exec_block->message) {
-                    if(!task_add_immediate((foreground_task_ptr)gc_output_message, st.exec_block->message))
-                        free(st.exec_block->message);
+                    task_add_immediate((foreground_task_ptr)gc_output_message, st.exec_block->message);
                     st.exec_block->message = NULL;
                 }
 
                 // Initialize Bresenham line and distance counters
-                st.counter.x = st.counter.y = st.counter.z
-                #ifdef A_AXIS
-                  = st.counter.a
-                #endif
-                #ifdef B_AXIS
-                  = st.counter.b
-                #endif
-                #ifdef C_AXIS
-                  = st.counter.c
-                #endif
-                #ifdef U_AXIS
-                  = st.counter.u
-                #endif
-                #ifdef V_AXIS
-                  = st.counter.v
-                #endif
-                #ifdef W_AXIS
-                  = st.counter.w
-                #endif
-                  = st.step_event_count >> 1;
+                if(st.exec_block != st.resume_block)
+                    st.counter.x = st.counter.y = st.counter.z
+                    #ifdef A_AXIS
+                      = st.counter.a
+                    #endif
+                    #ifdef B_AXIS
+                      = st.counter.b
+                    #endif
+                    #ifdef C_AXIS
+                      = st.counter.c
+                    #endif
+                    #ifdef U_AXIS
+                      = st.counter.u
+                    #endif
+                    #ifdef V_AXIS
+                      = st.counter.v
+                    #endif
+                    #ifdef W_AXIS
+                      = st.counter.w
+                    #endif
+                      = st.step_event_count >> 1;
 
-              #if !ADAPTIVE_MULTI_AXIS_STEP_SMOOTHING
-                memcpy(&st.steps, &st.exec_block->steps, sizeof(st.steps));
-              #endif
+                st.resume_block = NULL;
             }
 
-#if ADAPTIVE_MULTI_AXIS_STEP_SMOOTHING
-
-            // With AMASS enabled, adjust Bresenham axis increment counters according to AMASS level.
-            st.amass_level = st.exec_segment->amass_level;
-
-            uint_fast8_t idx = N_AXIS;
-            do {
-                idx--;
-                st.steps.value[idx] = st.exec_block->steps.value[idx] >> st.amass_level;
-            } while(idx);
-
+#if MAX_AMASS_LEVEL > 1
+            // Adjust Bresenham axis increment counters according to AMASS level.
+            if((st.amass_level = st.exec_segment->amass_level)) {
+                uint_fast8_t idx = N_AXIS;
+                do {
+                    idx--;
+                    st.steps.value[idx] = st.exec_block->steps.value[idx] >> st.amass_level;
+                } while(idx);
+            } else
 #endif
+                memcpy(st.steps.value, st.exec_block->steps.value, sizeof(steps_t));
 
             if(st.exec_segment->update_pwm)
                 st.exec_segment->update_pwm(st.exec_block->spindle, st.exec_segment->spindle_pwm);
@@ -573,12 +580,13 @@ ISR_CODE void ISR_FUNC(stepper_driver_interrupt_handler)(void)
             st_go_idle();
 
             // Ensure pwm is set properly upon completion of rate-controlled motion.
-            if(st.exec_block->dynamic_rpm && st.exec_block->spindle->cap.laser) {
+            if(st.exec_block && st.exec_block->dynamic_rpm && st.exec_block->spindle->cap.laser) {
                 prep.current_spindle_rpm = 0.0f;
                 st.exec_block->spindle->update_pwm(st.exec_block->spindle, st.exec_block->spindle->pwm_off_value);
             }
 
             cycles_per_tick = 0;
+            st.resume_block = st.exec_block;
             st.exec_block = NULL;
             system_set_exec_state_flag(EXEC_CYCLE_COMPLETE); // Flag main program for cycle complete
 
@@ -715,7 +723,7 @@ ISR_CODE void ISR_FUNC(stepper_driver_interrupt_handler)(void)
 
     if(st.step_count == 0 || --st.step_count == 0) {
         // Segment is complete. Advance segment tail pointer.
-        segment_buffer_tail = segment_buffer_tail->next;
+        segment_buffer.tail = segment_buffer.tail->next;
     }
 }
 
@@ -741,32 +749,32 @@ FLASHMEM void st_reset (void)
     for(idx = 0 ; idx <= idx_max ; idx++) {
         st_block_buffer[idx].next = &st_block_buffer[idx == idx_max ? 0 : idx + 1];
         st_block_buffer[idx].id = idx + 1;
+        st_block_buffer[idx].output_commands = gc_clear_output_commands(st_block_buffer[idx].output_commands);
     }
 
     // Set up segments ringbuffer as circular linked list, add id and clear AMASS level
     idx_max = (sizeof(segment_buffer) / sizeof(segment_t)) - 1;
     for(idx = 0 ; idx <= idx_max ; idx++) {
-        segment_buffer[idx].next = &segment_buffer[idx == idx_max ? 0 : idx + 1];
-        segment_buffer[idx].id = idx + 1;
-        segment_buffer[idx].amass_level = 0;
+        segment_buffer.segments[idx].next = &segment_buffer.segments[idx == idx_max ? 0 : idx + 1];
+        segment_buffer.segments[idx].id = idx + 1;
+        segment_buffer.segments[idx].amass_level = 0;
     }
 
-    st_prep_block = &st_block_buffer[0];
+    st_prep_block = st_block_buffer;
 
     // Initialize stepper algorithm variables.
     pl_block = NULL;  // Planner block pointer used by segment buffer
-    segment_buffer_tail = segment_buffer_head = &segment_buffer[0]; // empty = tail
+    segment_buffer.tail = segment_buffer.head = segment_buffer.segments; // empty = tail
 
     memset(&prep, 0, sizeof(prep));
     memset(&st, 0, sizeof(stepper_t));
 
-#if ADAPTIVE_MULTI_AXIS_STEP_SMOOTHING
-    // TODO: move to driver?
-    // AMASS_LEVEL0: Normal operation. No AMASS. No upper cutoff frequency. Starts at LEVEL1 cutoff frequency.
+#if MAX_AMASS_LEVEL > 1
+    // amass.level[0]: Normal operation. No AMASS. No upper cutoff frequency. Starts at amass.level[1] cutoff frequency.
     // Defined as step timer frequency / Cutoff frequency in Hz
-    amass.level_1 = hal.f_step_timer / 8000;
-    amass.level_2 = amass.level_1 << 1;
-    amass.level_3 = amass.level_2 << 1;
+    amass.level[0] = hal.f_step_timer / 8000;
+    for(idx = 1; idx < MAX_AMASS_LEVEL; idx++)
+        amass.level[idx] = amass.level[0] << idx;
 #endif
 
     cycles_per_min = (float)hal.f_step_timer * 60.0f;
@@ -807,16 +815,16 @@ void st_update_plan_block_parameters (bool fast_hold)
 
         hal.irq_disable();
 
-        segment_t *head = (segment_t *)segment_buffer_head;
+        segment_t *head = (segment_t *)segment_buffer.head;
 
-        if((exec_fast_hold = segment_buffer_head->next == segment_buffer_tail)) {
-            segment_buffer_head = segment_buffer_tail->next;
+        if((exec_fast_hold = segment_buffer.head->next == segment_buffer.tail)) {
+            segment_buffer.head = segment_buffer.tail->next;
             if(st.step_count < 3 || st.step_count < (st.exec_segment->n_step >> 3))
-                segment_buffer_head = segment_buffer_head->next;
-            while(segment_buffer_head->next != head && segment_buffer_head->ramp_type == Ramp_Decel)
-                segment_buffer_head = segment_buffer_head->next;
-            prep.current_speed = segment_buffer_head->current_rate;
-            segment_buffer_head = segment_buffer_head->next;
+                segment_buffer.head = segment_buffer.head->next;
+            while(segment_buffer.head->next != head && segment_buffer.head->ramp_type == Ramp_Decel)
+                segment_buffer.head = segment_buffer.head->next;
+            prep.current_speed = segment_buffer.head->current_rate;
+            segment_buffer.head = segment_buffer.head->next;
         }
 
         hal.irq_enable();
@@ -885,7 +893,7 @@ void st_prep_buffer (void)
     if (sys.step_control.end_motion)
         return;
 
-    while (segment_buffer_head->next != segment_buffer_tail) { // Check if we need to fill the buffer.
+    while (segment_buffer.head->next != segment_buffer.tail) { // Check if we need to fill the buffer.
 
         // Determine if we need to load a new planner block or if the block needs to be recomputed.
         if (pl_block == NULL) {
@@ -926,8 +934,8 @@ void st_prep_buffer (void)
 #endif
 
                 uint_fast8_t idx = N_AXIS;
-#if ADAPTIVE_MULTI_AXIS_STEP_SMOOTHING
-                // With AMASS enabled, simply bit-shift multiply all Bresenham data by the max AMASS
+
+                // With AMASS simply bit-shift multiply all Bresenham data by the max AMASS
                 // level, such that we never divide beyond the original data anywhere in the algorithm.
                 // If the original data is divided, we can lose a step from integer roundoff.
                 do {
@@ -935,14 +943,6 @@ void st_prep_buffer (void)
                     st_prep_block->steps.value[idx] = pl_block->steps.value[idx] << MAX_AMASS_LEVEL;
                 } while(idx);
                 st_prep_block->step_event_count = pl_block->step_event_count << MAX_AMASS_LEVEL;
-#else
-                do {
-                    idx--;
-                    st_prep_block->steps.value[idx] = pl_block->steps.value[idx] << 1;
-                } while(idx);
-                st_prep_block->step_event_count = pl_block->step_event_count << 1;
-#endif
-
                 st_prep_block->direction = pl_block->direction;
                 st_prep_block->programmed_rate = pl_block->programmed_rate;
 //                st_prep_block->r = pl_block->programmed_rate;
@@ -954,7 +954,11 @@ void st_prep_buffer (void)
                 st_prep_block->offset_id = pl_block->offset_id;
                 st_prep_block->backlash_motion = pl_block->condition.backlash_motion;
                 st_prep_block->message = pl_block->message;
+#if PLANNER_ADD_MOTION_MODE
+                st_prep_block->motion_mode = pl_block->motion_mode;
+#endif
                 pl_block->message = NULL;
+                pl_block->output_commands = NULL;
 
                 // Initialize segment buffer data for generating the segments.
                 prep.steps_per_mm = st_prep_block->steps_per_mm;
@@ -967,6 +971,7 @@ void st_prep_buffer (void)
 #ifdef KINEMATICS_API
                 prep.rate_multiplier = pl_block->rate_multiplier;
 #endif
+
                 if (sys.step_control.execute_hold || prep.recalculate.decel_override) {
                     // New block loaded mid-hold. Override planner block entry speed to enforce deceleration.
                     prep.current_speed = prep.exit_speed;
@@ -1088,7 +1093,7 @@ void st_prep_buffer (void)
             return;
 
         // Initialize new segment
-        segment_t *prep_segment = (segment_t *)segment_buffer_head;
+        segment_t *prep_segment = (segment_t *)segment_buffer.head;
 
         // Set new segment to point to the current segment data block.
         prep_segment->exec_block = st_prep_block;
@@ -1394,16 +1399,17 @@ if(jlog.idx < sizeof(jlog.data) - 1 && prep.ramp_type != Ramp_Cruise) {
 }
 #endif
 
-#if ADAPTIVE_MULTI_AXIS_STEP_SMOOTHING
+#if MAX_AMASS_LEVEL > 1
         // Compute step timing and multi-axis smoothing level.
-        // NOTE: AMASS overdrives the timer with each level, so only one prescalar is required.
-        if (cycles < amass.level_1)
+        // NOTE: AMASS overdrives the timer with each level.
+        if(cycles > amass.level[0]) {
+            uint_fast8_t level = 0;
+            while(++level < MAX_AMASS_LEVEL && cycles > amass.level[level]);
+            cycles >>= level;
+            prep_segment->n_step <<= level;
+            prep_segment->amass_level = level;
+        } else
             prep_segment->amass_level = 0;
-        else {
-            prep_segment->amass_level = cycles < amass.level_2 ? 1 : (cycles < amass.level_3 ? 2 : 3);
-            cycles >>= prep_segment->amass_level;
-            prep_segment->n_step <<= prep_segment->amass_level;
-        }
 #endif
 
         prep_segment->cycles_per_tick = cycles;
@@ -1411,7 +1417,7 @@ if(jlog.idx < sizeof(jlog.data) - 1 && prep.ramp_type != Ramp_Cruise) {
         prep_segment->ramp_type = prep.ramp_type;
 
         // Segment complete! Increment segment pointer, so stepper ISR can immediately execute it.
-        segment_buffer_head = segment_buffer_head->next;
+        segment_buffer.head = segment_buffer.head->next;
 
         // Update the appropriate planner and segment data.
         pl_block->millimeters = mm_remaining;
@@ -1460,6 +1466,15 @@ float st_get_realtime_rate (void)
             ? prep.current_speed
 #endif
             : 0.0f;
+}
+
+motion_mode_t st_get_motion_mode (void)
+{
+#if PLANNER_ADD_MOTION_MODE
+    return st.exec_block ? st.exec_block->motion_mode : gc_state.modal.motion;
+#else
+    return gc_state.modal.motion;
+#endif
 }
 
 offset_id_t st_get_offset_id (void)

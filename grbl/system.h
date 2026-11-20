@@ -26,6 +26,7 @@
 #include "gcode.h"
 #include "probe.h"
 #include "alarms.h"
+#include "stream.h"
 #include "messages.h"
 #if NGC_EXPRESSIONS_ENABLE
 #include "vfs.h"
@@ -221,7 +222,9 @@ typedef union {
                  travel_changed          :1, //!< Set to true when maximum travel settings has changed.
                  is_homing               :1,
 				 is_parking			     :1, //!< Set to true when CMD_SAFETY_DOOR is received.
-                 unused                  :3;
+				 soft_estop :1,
+				 mpg_auto_reporting      :1, //!< Set to true when MPG auto real time reporting is enabled.
+                 unused                  :1;
     };
 } system_flags_t;
 
@@ -245,7 +248,7 @@ typedef struct system {
     bool reset_pending;                     //!< Set when reset processing is underway.
     bool blocking_event;                    //!< Set when a blocking event that requires reset to clear is active.
     volatile bool steppers_deenergize;      //!< Set to true to deenergize stepperes
-    volatile system_flags_t flags;                   //!< Assorted state flags
+    volatile system_flags_t flags;          //!< Assorted state flags
     step_control_t step_control;            //!< Governs the step segment generator depending on system state.
     axes_signals_t homing_axis_lock;        //!< Locks axes when limits engage. Used as an axis motion mask in the stepper ISR.
     axes_signals_t homing;                  //!< Axes with homing enabled.
@@ -292,10 +295,11 @@ typedef const char *(*sys_help_ptr)(const char *command);
 typedef union {
     uint8_t flags;
     struct {
-        uint8_t noargs         :1, //!< System command does not handle arguments.
-                allow_blocking :1, //!< System command can be used when blocking event is active.
-                help_fn        :1,
-                unused         :5;
+        uint8_t noargs         :1, //!< Command does not handle arguments.
+                allow_blocking :1, //!< Command can be executed when blocking event is active.
+                help_fn        :1, //!< Command help is dynamic (output is via function call).
+                allow_redirect :1, //!< Command output can be to other other streams than the current.
+                unused         :4;
     };
 } sys_command_flags_t;
 
@@ -323,11 +327,13 @@ uint8_t system_n_axis (void);
 uint8_t system_axis_mask (void);
 uint8_t system_claim_axis (void);
 
-status_code_t system_execute_line (char *line);
+status_code_t system_execute_line (char *line, stream_write_ptr write);
 void system_execute_startup (void *data);
 void system_flag_wco_change (void);
 void system_convert_array_steps_to_mpos (float *position, int32_t *steps);
-bool system_xy_at_fixture (coord_system_id_t id, float tolerance);
+bool system_pos_at_fixture (point_2d_t pos, uint8_t skip_axis, coord_system_id_t id, float tolerance);
+bool system_at_fixture (uint8_t skip_axis, coord_system_id_t id, float tolerance);
+bool system_xy_at_fixture (coord_system_id_t id, float tolerance); // deprecated?
 void system_raise_alarm (alarm_code_t alarm);
 void system_init_switches (void);
 void system_command_help (void);

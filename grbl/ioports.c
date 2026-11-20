@@ -857,6 +857,19 @@ FLASHMEM static io_ports_list_t *insert_ports (void)
     return io_ports;
 }
 
+FLASHMEM static uint8_t get_pin_base (io_port_type_t type, io_port_direction_t dir)
+{
+    uint8_t pin_base = 0;
+    io_ports_list_t *io_ports;
+
+    if((io_ports = ports)) do {
+        if(io_ports->type == type && io_ports->ports_id && io_ports->ports_id->external)
+            pin_base += io_ports->ports_id->cfg[dir].n_ports;
+    } while((io_ports = io_ports->next));
+
+    return pin_base;
+}
+
 FLASHMEM static bool claim_hal (void)
 {
     io_port_t empty = {};
@@ -1062,13 +1075,17 @@ FLASHMEM bool ioports_add_analog (io_analog_t *analog)
         if((ports = insert_ports())) {
 
             ports->type = Port_Analog;
-            ports->ports_id = analog->ports;
             ports->hal.set_pin_description = analog->set_pin_description;
             ports->hal.get_pin_info = analog->get_pin_info;
-            if(analog->ports->out.n_ports)
+            if(analog->ports->out.n_ports) {
                 ports->hal.analog_out = analog->analog_out;
-            if(analog->ports->in.n_ports)
+                analog->ports->out.pin_base = get_pin_base(Port_Analog, Port_Output);
+            }
+            if(analog->ports->in.n_ports) {
                 ports->hal.wait_on_input = analog->wait_on_input;
+                analog->ports->out.pin_base = get_pin_base(Port_Analog, Port_Input);
+            }
+            ports->ports_id = analog->ports;
         }
     }
 
@@ -1091,15 +1108,18 @@ FLASHMEM bool ioports_add_digital (io_digital_t *digital)
         if((io_ports = insert_ports())) {
 
             io_ports->type = Port_Digital;
-            io_ports->ports_id = digital->ports;
             io_ports->hal.set_pin_description = digital->set_pin_description;
             io_ports->hal.get_pin_info = digital->get_pin_info;
-            if(digital->ports->out.n_ports)
+            if(digital->ports->out.n_ports) {
                 io_ports->hal.digital_out = digital->digital_out;
+                digital->ports->out.pin_base = get_pin_base(Port_Digital, Port_Output);
+            }
             if(digital->ports->in.n_ports) {
                 io_ports->hal.wait_on_input = digital->wait_on_input;
                 io_ports->hal.register_interrupt_handler = digital->register_interrupt_handler;
+                digital->ports->in.pin_base = get_pin_base(Port_Digital, Port_Input);
             }
+            io_ports->ports_id = digital->ports;
         }
 
         ioports_add_settings(NULL, NULL);
@@ -1423,7 +1443,7 @@ PROGMEM static const setting_group_detail_t ioport_groups[] = {
 PROGMEM static const setting_detail_t ioport_settings[] = {
     { Settings_IoPort_InvertIn, Group_AuxPorts, "Invert I/O Port inputs", NULL, Format_Bitfield, ports_cfg[Port_DigitalIn].port_names, NULL, NULL, Setting_NonCoreFn, aux_set_value, aux_get_value, is_setting_available },
 #ifdef AUX_SETTINGS_PULLUP
-    { Settings_IoPort_Pullup_Disable, Group_AuxPorts, "I/O Port inputs pullup disable", NULL, Format_Bitfield, digital.in.port_names, NULL, NULL, Setting_NonCoreFn, aux_set_value, aux_get_value, is_setting_available },
+    { Settings_IoPort_Pullup_Disable, Group_AuxPorts, "I/O Port inputs pullup disable", NULL, Format_Bitfield, ports_cfg[Port_DigitalIn].port_names, NULL, NULL, Setting_NonCoreFn, aux_set_value, aux_get_value, is_setting_available },
 #endif
     { Settings_IoPort_InvertOut, Group_AuxPorts, "Invert I/O Port outputs", NULL, Format_Bitfield, ports_cfg[Port_DigitalOut].port_names, NULL, NULL, Setting_NonCoreFn, aux_set_value, aux_get_value, is_setting_available },
 //    { Settings_IoPort_OD_Enable, Group_AuxPorts, "I/O Port outputs as open drain", NULL, Format_Bitfield, digital.out.port_names, NULL, NULL, Setting_NonCoreFn, aux_set_value, aux_get_value, is_setting_available }
@@ -1525,7 +1545,7 @@ FLASHMEM void ioport_setting_changed (setting_id_t id)
 
                             if((ctrl = xbar_fn_to_signals_mask(xbar->function)).mask) {
                                 in_config.inverted = !!(settings.control_invert.mask & ctrl.mask);
-                                in_config.pull_mode = (settings.control_disable_pullup.mask & ctrl.mask) ? PullMode_None : PullMode_Up;
+                                in_config.pull_mode = (settings.control_disable_pullup.mask & ctrl.mask) ? PullMode_Down : PullMode_Up;
                             } else {
                                 in_config.inverted = !!(settings.ioport.invert_in.mask & (1 << port));
                                 in_config.pull_mode = (pull_mode_t)xbar->mode.pull_mode;
@@ -1609,8 +1629,7 @@ FLASHMEM static void ioports_configure (settings_t *settings)
 
 FLASHMEM static void onSettingsChanged (settings_t *settings, settings_changed_flags_t changed)
 {
-    if(on_settings_changed)
-        on_settings_changed(settings, changed);
+    on_settings_changed(settings, changed);
 
     if(sys.ioinit_pending)
         ioports_configure(settings);

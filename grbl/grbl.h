@@ -42,7 +42,7 @@
 #else
 #define GRBL_VERSION "1.1f"
 #endif
-#define GRBL_BUILD 20260719
+#define GRBL_BUILD 20261015
 
 #define GRBL_URL "https://github.com/grblHAL"
 
@@ -86,7 +86,7 @@
 #define __STATIC_FORCEINLINE __attribute__((always_inline)) static inline
 #endif
 
-#if (COREXY || WALL_PLOTTER || DELTA_ROBOT || POLAR_ROBOT || ASYMMETRIC_GANGING || ASYMMETRIC_AUTO_SQUARE) && !defined(KINEMATICS_API)
+#if (COREXY || WALL_PLOTTER || DELTA_ROBOT || POLAR_ROBOT || RTCP_AC || ASYMMETRIC_GANGING || ASYMMETRIC_AUTO_SQUARE) && !defined(KINEMATICS_API)
 #define KINEMATICS_API
 #endif
 
@@ -133,27 +133,28 @@
 #define CMD_OVERRIDE_RAPID_RESET            0x95 //!< (149) Restores rapid override value to 100%.
 #define CMD_OVERRIDE_RAPID_MEDIUM           0x96 // (150)
 #define CMD_OVERRIDE_RAPID_LOW              0x97 // (151)
-// #define CMD_OVERRIDE_RAPID_EXTRA_LOW 0x98 // *NOT SUPPORTED*
-#define CMD_OVERRIDE_SPINDLE_RESET 			0x99 // (153) Restores spindle override value to 100%.
+#define CMD_OVERRIDE_RAPID_EXTRA_LOW        0x98 // (152)
+#define CMD_OVERRIDE_SPINDLE_RESET          0x99 // (153) Restores spindle override value to 100%.
 #define CMD_OVERRIDE_SPINDLE_COARSE_PLUS    0x9A // (154)
 #define CMD_OVERRIDE_SPINDLE_COARSE_MINUS   0x9B // (155)
 #define CMD_OVERRIDE_SPINDLE_FINE_PLUS      0x9C // (156)
 #define CMD_OVERRIDE_SPINDLE_FINE_MINUS     0x9D // (157)
 #define CMD_OVERRIDE_SPINDLE_STOP           0x9E // (158)
+#define CMD_SOFT_ESTOP                      0x9F //!< (159) Executes a soft reset, raises estop alarm and enters STATE_ESTOP
 #define CMD_OVERRIDE_COOLANT_FLOOD_TOGGLE   0xA0 // (160)
 #define CMD_OVERRIDE_COOLANT_MIST_TOGGLE    0xA1 // (161)
 #define CMD_PID_REPORT                      0xA2 // (162)
 #define CMD_TOOL_ACK                        0xA3 // (163)
 #define CMD_PROBE_CONNECTED_TOGGLE          0xA4 // (164)
 // The following character codes are reserved for plugin use
-#define CMD_MACRO_0 						0xB0 // (176)
-#define CMD_MACRO_1 						0xB1 // (177)
-#define CMD_MACRO_2 						0xB2 // (178)
-#define CMD_MACRO_3 						0xB3 // (179)
-#define CMD_MACRO_4 						0xB4 // (180)
-#define CMD_MACRO_5 						0xB5 // (181)
-#define CMD_MACRO_6 						0xB6 // (182)
-#define CMD_MACRO_7 						0xB7 // (183)
+#define CMD_MACRO_0                         0xB0 // (176)
+#define CMD_MACRO_1                         0xB1 // (177)
+#define CMD_MACRO_2                         0xB2 // (178)
+#define CMD_MACRO_3                         0xB3 // (179)
+#define CMD_MACRO_4                         0xB4 // (180)
+#define CMD_MACRO_5                         0xB5 // (181)
+#define CMD_MACRO_6                         0xB6 // (182)
+#define CMD_MACRO_7                         0xB7 // (183)
 
 // System motion line numbers must be zero.
 #define JOG_LINE_NUMBER 0
@@ -186,20 +187,20 @@
 // Configure rapid, feed, and spindle override settings. These values define the max and min
 // allowable override values and the coarse and fine increments per command received. Please
 // note the allowable values in the descriptions following each define.
-#define DEFAULT_FEED_OVERRIDE           100 // 100%. Don't change this value.
+#define DEFAULT_FEED_OVERRIDE             100 // 100%. Don't change this value.
 #ifndef MAX_FEED_RATE_OVERRIDE
-#define MAX_FEED_RATE_OVERRIDE          200 // Percent of programmed feed rate (100-65535). Usually 120% or 200%
+#define MAX_FEED_RATE_OVERRIDE            200 // Percent of programmed feed rate (100-65535). Usually 120% or 200%
 #endif
 #ifndef MIN_FEED_RATE_OVERRIDE
-#define MIN_FEED_RATE_OVERRIDE           10 // Percent of programmed feed rate (1-100). Usually 50% or 1%
+#define MIN_FEED_RATE_OVERRIDE             10 // Percent of programmed feed rate (1-100). Usually 50% or 1%
 #endif
-#define FEED_OVERRIDE_COARSE_INCREMENT   10 // (1-99). Usually 10%.
-#define FEED_OVERRIDE_FINE_INCREMENT      1 // (1-99). Usually 1%.
+#define FEED_OVERRIDE_COARSE_INCREMENT     10 // (1-99). Usually 10%.
+#define FEED_OVERRIDE_FINE_INCREMENT        1 // (1-99). Usually 1%.
 
-#define DEFAULT_RAPID_OVERRIDE  100 // 100%. Don't change this value.
-#define RAPID_OVERRIDE_MEDIUM    50 // Percent of rapid (1-99). Usually 50%.
-#define RAPID_OVERRIDE_LOW       25 // Percent of rapid (1-99). Usually 25%.
-// #define RAPID_OVERRIDE_EXTRA_LOW 5 // *NOT SUPPORTED* Percent of rapid (1-99). Usually 5%.
+#define DEFAULT_RAPID_OVERRIDE            100 // 100%. Don't change this value.
+#define RAPID_OVERRIDE_MEDIUM              50 // Percent of rapid (1-99). Usually 50%.
+#define RAPID_OVERRIDE_LOW                 25 // Percent of rapid (1-99). Usually 25%.
+#define RAPID_OVERRIDE_EXTRA_LOW            5 // Percent of rapid (1-99). Usually 5%.
 
 #define DEFAULT_SPINDLE_RPM_OVERRIDE      100 // 100%. Don't change this value.
 #ifndef MAX_SPINDLE_RPM_OVERRIDE
@@ -216,9 +217,6 @@
 // frequencies below 10kHz, where the aliasing between axes of multi-axis motions can cause audible
 // noise and shake your machine. At even lower step frequencies, AMASS adapts and provides even better
 // step smoothing. See stepper.c for more details on the AMASS system works.
-#ifndef ADAPTIVE_MULTI_AXIS_STEP_SMOOTHING
-#define ADAPTIVE_MULTI_AXIS_STEP_SMOOTHING 1 // Default enabled. Set to 0 to disable.
-#endif
 
 // Define Adaptive Multi-Axis Step-Smoothing(AMASS) levels and cutoff frequencies. The highest level
 // frequency bin starts at 0Hz and ends at its cutoff frequency. The next lower level frequency bin
@@ -229,13 +227,12 @@
 // NOTE: AMASS cutoff frequency multiplied by ISR overdrive factor must not exceed maximum step frequency.
 // NOTE: Current settings are set to overdrive the ISR to no more than 16kHz, balancing CPU overhead
 // and timer accuracy.  Do not alter these settings unless you know what you are doing.
-#if ADAPTIVE_MULTI_AXIS_STEP_SMOOTHING
-  #ifndef MAX_AMASS_LEVEL
-    #define MAX_AMASS_LEVEL 3
-  #endif
-  #if MAX_AMASS_LEVEL <= 0
-    error "AMASS must have 1 or more levels to operate correctly."
-  #endif
+
+#ifndef MAX_AMASS_LEVEL
+#define MAX_AMASS_LEVEL 3 // Set to 1 to disable AMASS, replaces #define ADAPTIVE_MULTI_AXIS_STEP_SMOOTHING 0
+#endif
+#if MAX_AMASS_LEVEL <= 0
+error "AMASS must have 1 or more levels to operate correctly."
 #endif
 
 // Sets which axis the tool length offset is applied. Assumes the spindle is always parallel with

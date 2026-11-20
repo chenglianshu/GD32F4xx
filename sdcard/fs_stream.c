@@ -26,6 +26,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <errno.h>
 
 #define BUFLEN 80
 
@@ -91,7 +92,6 @@ static file_t file = {
 
 static struct {
     uint8_t mounted;
-    vfs_st_mode_t mode;
 } fs = {};
 
 static bool frewind = false, webui = false;
@@ -185,7 +185,7 @@ static int scan_dir (char *path, uint_fast8_t depth, char *buf, bool filtered)
         if(depth == 0 && dirent->st_mode.directory && !dirent->st_mode.hidden && snprintf(buf, BUFLEN, "[FILE:%s%s|SIZE:-1]" ASCII_EOL, path, dirent->name))
             hal.stream.write(buf);
 
-        grbl.on_execute_realtime(state_get());
+        task_execute(false);
     }
 
     int err = vfs_errno;
@@ -221,7 +221,7 @@ static int scan_dir (char *path, uint_fast8_t depth, char *buf, bool filtered)
             path[pathlen] = '\0';
         }
 
-        grbl.on_execute_realtime(state_get());
+        task_execute(false);
     }
 
     if(dir)
@@ -235,7 +235,7 @@ FLASHMEM static void file_close (void)
     if(file.handle) {
         vfs_close(file.handle);
         if(hal.stream.file == file.handle)
-            hal.stream.file = NULL;
+            stream_set_file(NULL, NULL);
         file.handle = NULL;
     }
 }
@@ -320,7 +320,6 @@ FLASHMEM static void stream_end_job (bool flush)
     grbl.on_stream_changed = on_stream_changed;
 
     memcpy(&hal.stream, &active_stream, offsetof(io_stream_t, report)); // Restore stream pointers,
-    stream_set_type(hal.stream.type, hal.stream.file);                  // ...
     active_stream.type = StreamType_Null;                               // ...
     hal.stream.set_enqueue_rt_handler(enqueue_realtime_command);        // real time command handling and
     if(grbl.report.status_message == trap_status_messages)              // ...
@@ -336,7 +335,7 @@ FLASHMEM static void stream_end_job (bool flush)
     webui = frewind = false;
 
     if(grbl.on_stream_changed)
-        grbl.on_stream_changed(hal.stream.type);
+        grbl.on_stream_changed();
 }
 
 static int32_t stream_read (void)
@@ -528,23 +527,22 @@ static bool check_input_stream (uint8_t c)
     return ok;
 }
 
-FLASHMEM static void stream_changed (stream_type_t type)
+FLASHMEM static void stream_changed (void)
 {
-    if(type != StreamType_File && file.handle != NULL) {
+    if(!stream_is_file() && file.handle != NULL) {
 
         // Reconnect from WebUI?
-        if(webui && (type != StreamType_WebSocket || hal.stream.state.webui_connected)) {
+        if(webui && (hal.stream.type != StreamType_WebSocket || hal.stream.state.webui_connected)) {
             active_stream.set_enqueue_rt_handler(enqueue_realtime_command); // Restore previous real time handler,
             memcpy(&active_stream, &hal.stream, sizeof(io_stream_t));       // save current stream pointers
-            hal.stream.read = read_redirected;                              // then redirect to read from file instead
-            stream_set_type(StreamType_File, file.handle);                  // ...
+            stream_set_file(file.handle, read_redirected);                  // then redirect to read from file instead
 
             if(hal.stream.suspend_read)                                     // If active stream support tool change suspend
                 hal.stream.suspend_read = stream_suspend;                   // then we do as well
             else                                                            //
                 hal.stream.suspend_read = NULL;                             // else not
 
-            if(type == StreamType_WebSocket)                                                        // If WebUI came back online
+            if(hal.stream.type == StreamType_WebSocket)                                             // If WebUI came back online
                 enqueue_realtime_command = hal.stream.set_enqueue_rt_handler(drop_input_stream);    // restore normal operation
             else                                                                                    // else
                 enqueue_realtime_command = hal.stream.set_enqueue_rt_handler(check_input_stream);   // check for stream takeover
@@ -553,7 +551,7 @@ FLASHMEM static void stream_changed (stream_type_t type)
     }
 
     if(on_stream_changed)
-        on_stream_changed(type);
+        on_stream_changed();
 }
 
 FLASHMEM status_code_t stream_file (sys_state_t state, char *fname)
@@ -562,9 +560,11 @@ FLASHMEM status_code_t stream_file (sys_state_t state, char *fname)
     status_code_t retval = Status_Unhandled;
 
     if(!fs.mounted)
-        retval = Status_SDNotMounted;
+        retval = Status_FsNotMounted;
     else if(!(state == STATE_IDLE || state == STATE_CHECK_MODE))
         retval = Status_SystemGClock;
+//    else if(file.handle)
+//        retval = nesting not allowed;
     else if(fname && vfs_stat(fname, &st) == 0) {
 
         if(st.st_mode.directory)
@@ -578,8 +578,7 @@ FLASHMEM status_code_t stream_file (sys_state_t state, char *fname)
             if(!(grbl.on_file_open && (retval = grbl.on_file_open(fname, file.handle, true)) == Status_OK)) {
 
                 memcpy(&active_stream, &hal.stream, sizeof(io_stream_t));   // Save current stream pointers
-                hal.stream.read = stream_read;                              // then redirect to read from file
-                stream_set_type(StreamType_File, file.handle);              // ...
+                stream_set_file(file.handle, stream_read);                  // then redirect to read from file
                 if(hal.stream.suspend_read)                                 // If active stream support tool change suspend
                     hal.stream.suspend_read = stream_suspend;               // then we do as well
                 else                                                        //
@@ -602,7 +601,7 @@ FLASHMEM status_code_t stream_file (sys_state_t state, char *fname)
                 enqueue_realtime_command = hal.stream.set_enqueue_rt_handler(drop_input_stream);    // Drop input from current stream except realtime commands
 
                 if(grbl.on_stream_changed)
-                    grbl.on_stream_changed(hal.stream.type);
+                    grbl.on_stream_changed();
 
                 read_redirected = hal.stream.read;
 
@@ -663,7 +662,7 @@ FLASHMEM static status_code_t cmd_to_output (sys_state_t state, char *args)
     status_code_t retval = Status_Unhandled;
 
     if(!fs.mounted)
-        retval = Status_SDNotMounted;
+        retval = Status_FsNotMounted;
     else if(!(state == STATE_IDLE || state == STATE_CHECK_MODE))
         retval = Status_SystemGClock;
     else if(args) {
@@ -777,25 +776,55 @@ FLASHMEM static status_code_t cmd_mount_info (sys_state_t state, char *args)
     return Status_OK;
 }
 
+#if (FF_FS_READONLY == 0 && FF_FS_MINIMIZE == 0) || (FS_ENABLE & FS_LFS)
+
 FLASHMEM static status_code_t cmd_unlink (sys_state_t state, char *args)
 {
     status_code_t retval = Status_Unhandled;
 
     if(!fs.mounted)
-        retval = Status_SDNotMounted;
-    else if(fs.mode.read_only)
-        retval = Status_FsReadOnly;
+        retval = Status_FsNotMounted;
     else if(!(state == STATE_IDLE || state == STATE_CHECK_MODE))
         retval = Status_SystemGClock;
     else if(args)
-        retval = vfs_unlink(args) ? Status_FileReadError : Status_OK;
+        retval = vfs_unlink(args) ? (vfs_errno == EROFS ? Status_FsReadOnly : Status_FileDeleteFailed) : Status_OK;
 
     return retval;
 }
 
+FLASHMEM static status_code_t cmd_mkdir (sys_state_t state, char *args)
+{
+    status_code_t retval = Status_Unhandled;
+
+    if(!fs.mounted)
+        retval = Status_FsNotMounted;
+    else if(!(state == STATE_IDLE || state == STATE_CHECK_MODE))
+        retval = Status_SystemGClock;
+    else if(args)
+        retval = vfs_mkdir(args) ? (vfs_errno == EROFS ? Status_FsReadOnly : Status_FileOpenFailed) : Status_OK;
+
+    return retval;
+}
+
+FLASHMEM static status_code_t cmd_rmdir (sys_state_t state, char *args)
+{
+    status_code_t retval = Status_Unhandled;
+
+    if(!fs.mounted)
+        retval = Status_FsNotMounted;
+    else if(!(state == STATE_IDLE || state == STATE_CHECK_MODE))
+        retval = Status_SystemGClock;
+    else if(args)
+        retval = vfs_rmdir(args) ? (vfs_errno == EROFS ? Status_FsReadOnly : Status_FileDeleteFailed) : Status_OK;
+
+    return retval;
+}
+
+#endif
+
 FLASHMEM static void onReset (void)
 {
-    if(hal.stream.type == StreamType_File && active_stream.type != StreamType_Null) {
+    if(stream_is_file() && active_stream.type != StreamType_Null) {
         if(file.line_number) {
             char buf[70];
             sprintf(buf, "Reset during streaming of file at line: " UINT32FMT, file.line_number);
@@ -840,15 +869,14 @@ FLASHMEM static void onReportOptions (bool newopt)
   #if (FS_ENABLE & FS_SDCARD) && FF_FS_READONLY == 0
         if(hal.stream.write_char)
             hal.stream.write(",YM");
-  #elif FS_ENABLE & FS_LFS_ROOT
+  #elif (FS_ENABLE & (FS_LFS_ROOT|FS_POSIX))
         hal.stream.write(hal.stream.write_char == NULL ? ",FS" : ",FS,YM");
   #endif
 #else
         hal.stream.write(",FS");
 #endif
     } else
-        report_plugin("FS stream", "1.13");
-
+        report_plugin("FS stream", "1.16");
 }
 
 FLASHMEM static void onFsUnmount (const char *path)
@@ -864,7 +892,6 @@ FLASHMEM static void onFsMount (const char *path, const vfs_t *vfs, vfs_st_mode_
     if(!mode.hidden) {
 
         fs.mounted++;
-        fs.mode = mode;
 
         if(driver_reset == NULL) {
 
@@ -889,8 +916,10 @@ FLASHMEM void fs_stream_init (void)
         } },
         {"F+", cmd_file_all, {}, { .str = "$F+ - list all files" } },
         {"FR", cmd_rewind, { .noargs = On }, { .str = "enable rewind mode for next file to run" } },
-    #if FF_FS_READONLY == 0 && FF_FS_MINIMIZE == 0
+    #if (FF_FS_READONLY == 0 && FF_FS_MINIMIZE == 0) || (FS_ENABLE & FS_LFS)
         {"FD", cmd_unlink, {}, { .str = "$FD=<filename> - delete file" } },
+        {"FMD", cmd_mkdir, {}, { .str = "$FMD=<path> - create directory" } },
+        {"FRD", cmd_rmdir, {}, { .str = "$FRD=<path> - remove empty directory" } },
     #endif
         {"FF", cmd_format, {}, { .str = "$FF=yes - format file system" } },
         {"F<", cmd_to_output, {}, { .str = "$F<=<filename> - dump file to output" } },
@@ -905,13 +934,12 @@ FLASHMEM void fs_stream_init (void)
     };
 
     PROGMEM static const status_detail_t status_detail[] = {
-        { Status_FileReadError, "File delete failed." },
         { Status_FsFailedOpenDir, "Directory listing failed." },
         { Status_FSDirNotFound, "Directory not found." },
-        { Status_SDNotMounted, "SD Card not mounted." },
         { Status_FsNotMounted, "File system not mounted." },
         { Status_FsReadOnly, "File system is read only." },
-        { Status_FsFormatFailed, "File system format failed." }
+        { Status_FsFormatFailed, "File system format failed." },
+        { Status_FileDeleteFailed, "Delete failed." }
     };
 
     static error_details_t error_details = {
@@ -933,7 +961,7 @@ FLASHMEM void fs_stream_init (void)
     errors_register(&error_details);
     system_register_commands(&sdcard_commands);
 
-#if (FS_ENABLE & FS_YMODEM) && (((FS_ENABLE & FS_SDCARD) && FF_FS_READONLY == 0) || (FS_ENABLE & FS_LFS_ROOT))
+#if (FS_ENABLE & FS_YMODEM) && (((FS_ENABLE & FS_SDCARD) && FF_FS_READONLY == 0) || (FS_ENABLE & (FS_LFS_ROOT|FS_POSIX)))
     if(hal.stream.write_char != NULL)
         ymodem_init();
 #endif

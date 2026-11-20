@@ -599,7 +599,7 @@ FLASHMEM status_code_t ngc_read_name (char *line, uint_fast8_t *pos, char *buffe
 
         s++;
 
-        while((c = *s++) && c != '>' && len <= NGC_MAX_PARAM_LENGTH) {
+        while((c = *s++) && c != '>' && len < NGC_MAX_PARAM_LENGTH) {
             *buffer++ = LCAPS(c);
             (*pos)++;
             len++;
@@ -1010,10 +1010,12 @@ FLASHMEM char *ngc_substitute_parameters (char *line)
     // Calculate length of substituted string
     while((c = line[char_counter++])) {
         if(parse_format) {
+            int8_t prev_format = parse_format;
             if((parse_format = get_format(c, parse_format, &decimals)) < 0) {
                 len -= parse_format;
                 parse_format = 0;
-            }
+            } else if(parse_format == 0)
+                len += prev_format + 1;
         } else if(c == '%')
             parse_format = 1;
         else if(c == '#') {
@@ -1029,10 +1031,12 @@ FLASHMEM char *ngc_substitute_parameters (char *line)
     // Perform substitution
     if((s = message = malloc(len + 1))) {
 
-        char fmt[5] = {0};
+        char fmt[5];
 
         *s = '\0';
         char_counter = 0;
+        parse_format = 0;
+        decimals = ngc_float_decimals();
 
         while((c = line[char_counter++])) {
             if(parse_format) {
@@ -1046,6 +1050,7 @@ FLASHMEM char *ngc_substitute_parameters (char *line)
                 }
             } else if(c == '%') {
                 parse_format = 1;
+                memset(fmt, 0, sizeof(fmt));
                 fmt[0] = c;
             } else if(c == '#') {
                 char_counter--;

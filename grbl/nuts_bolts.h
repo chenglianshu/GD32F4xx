@@ -25,6 +25,7 @@
 #define _NUTS_BOLTS_H_
 
 #include "grbl.h"
+#include "real.h"
 #include "errors.h"
 
 #ifndef true
@@ -61,10 +62,15 @@
 #define CAPS(c) ((c >= 'a' && c <= 'z') ? (c & 0x5F) : c)
 #define LCAPS(c) ((c >= 'A' && c <= 'Z') ? (c | 0x20) : c)
 
-#if !(defined(STM32F103xB) || defined(STM32F303xC))
+#if !(defined(STM32F103xB) || defined(STM32F303xC) || defined(STM32F756xx) || defined(STM32F765xx))
 #ifndef UNUSED
 #define UNUSED(x) (void)(x)
 #endif
+#endif
+
+#if RTCP_AC && N_AXIS == 5 && AXIS4_LETTER != 'C'
+#undef AXIS4_LETTER
+#define AXIS4_LETTER 'C'
 #endif
 
 // Axis array index values. Must start with 0 and be continuous.
@@ -326,7 +332,7 @@ typedef struct {
 } coord_system_data_t;
 
 typedef union {
-    int32_t value[N_AXIS];
+    int32_t values[N_AXIS];
     struct {
         int32_t x;
         int32_t y;
@@ -355,21 +361,39 @@ typedef union {
 } mpos_t;
 
 typedef union {
-    float values[2];
+    real_t values[2];
     struct {
-        float x;
-        float y;
+        real_t x;
+        real_t y;
     };
+    struct {
+        real_t z;
+        real_t x;
+    } g18;
+/*    struct {
+        real_t y;
+        real_t z;
+    } g19; */
 } point_2d_t;
 
+typedef struct {
+    point_2d_t min;
+    point_2d_t max;
+} bbox_2d_t;
+
 typedef union {
-    float values[3];
+    real_t values[3];
     struct {
-        float x;
-        float y;
-        float z;
+        real_t x;
+        real_t y;
+        real_t z;
     };
 } point_3d_t;
+
+typedef struct {
+    point_3d_t min;
+    point_3d_t max;
+} bbox_3d_t;
 
 //! Axis index to plane assignment.
 typedef union {
@@ -516,7 +540,7 @@ void dummy_handler (void);
 
 #ifdef _WIN32
 
-static int ffs (int i)
+static inline int ffs (int i)
 {
     int idx = 0;
 

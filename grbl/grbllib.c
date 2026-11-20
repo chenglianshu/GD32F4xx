@@ -42,20 +42,19 @@
 #include "motion_control.h"
 #endif
 #ifdef KINEMATICS_API
-#include "kinematics.h"
+#include "kinematics/interface.h"
 #endif
 
-static void task_execute (sys_state_t state);
+//static void task_execute (sys_state_t state);
 
 typedef union {
     uint8_t ok;
     struct {
-        uint8_t init          :1,
-                setup         :1,
-                spindle       :1,
-                amass         :1,
-                pulse_delay   :1,
-                unused        :3;
+        uint8_t init        :1,
+                setup       :1,
+                spindle     :1,
+                pulse_delay :1,
+                unused      :4;
     };
 } driver_startup_t;
 
@@ -65,9 +64,10 @@ typedef union {
 
 typedef struct core_task {
     uint32_t time;
+    volatile uint32_t lock;
     foreground_task_ptr fn;
     void *data;
-    struct core_task *next;
+    volatile struct core_task *next;
 } core_task_t;
 
 DCRAM system_t sys; //!< System global variable structure.
@@ -75,7 +75,6 @@ DCRAM grbl_t grbl;
 DCRAM grbl_hal_t hal;
 
 static driver_startup_t driver = { .ok = 0xFF };
-static settings_changed_ptr hal_settings_changed;
 static stepper_enable_ptr stepper_enable;
 DCRAM static struct {
     volatile core_task_t *immediate;     //!< Pointer to first entry of linked list of tasks to run immediately.
@@ -111,7 +110,7 @@ __attribute__((always_inline)) static inline core_task_t *task_run (core_task_t 
     foreground_task_ptr fn = task->fn;
     void *data = task->data;
 
-    task = task->next;
+    task = (core_task_t *)task->next;
     task_free(t);
 
     hal.irq_enable();
@@ -239,12 +238,14 @@ FLASHMEM static void tool_changed (tool_data_t *tool)
     }
 }
 
-FLASHMEM static void settings_changed (settings_t *settings, settings_changed_flags_t changed)
+FLASHMEM static void dummy_on_settings_changed (settings_t *settings, settings_changed_flags_t changed)
 {
-    hal_settings_changed(settings, changed);
+    // NOOP
+}
 
-    if(grbl.on_settings_changed)
-        grbl.on_settings_changed(settings, changed);
+static void on_execute_end (sys_state_t state)
+{
+    // NOOP
 }
 
 FLASHMEM static atc_status_t atc_get_state (void)
@@ -266,10 +267,11 @@ FLASHMEM int grbl_enter (void)
 
     // Clear all and set some core function pointers
     memset(&grbl, 0, sizeof(grbl_t));
-    grbl.on_execute_realtime = grbl.on_execute_delay = task_execute;
+    grbl.on_execute_realtime = grbl.on_execute_delay = on_execute_end;
     grbl.enqueue_gcode = protocol_enqueue_gcode;
     grbl.enqueue_realtime_command = stream_enqueue_realtime_command;
     grbl.on_report_options = dummy_bool_handler;
+    grbl.on_settings_changed = dummy_on_settings_changed;
     grbl.on_report_command_help = system_command_help;
     grbl.on_get_alarms = alarms_get_details;
     grbl.on_get_errors = errors_get_details;
@@ -343,6 +345,11 @@ FLASHMEM int grbl_enter (void)
     polar_init();
 #endif
 
+#if RTCP_AC
+    extern void rtcp_ac_init (void);
+    rtcp_ac_init();
+#endif
+
 #if defined(ASYMMETRIC_GANGING) || defined(ASYMMETRIC_AUTO_SQUARE)
     extern void asymmetric_ganging_init (void);
     asymmetric_ganging_init();
@@ -360,13 +367,6 @@ FLASHMEM int grbl_enter (void)
     stepper_enable = hal.stepper.enable;
     hal.stepper.enable = stepperEnable;
 
-#if ADAPTIVE_MULTI_AXIS_STEP_SMOOTHING
-    driver.amass = hal.driver_cap.amass_level >= MAX_AMASS_LEVEL;
-    hal.driver_cap.amass_level = MAX_AMASS_LEVEL;
-#else
-    hal.driver_cap.amass_level = 0;
-#endif
-
 #ifdef DEFAULT_STEP_PULSE_DELAY
     driver.pulse_delay = hal.driver_cap.step_pulse_delay;
 #endif
@@ -378,9 +378,6 @@ FLASHMEM int grbl_enter (void)
     sys.mpg_mode = false;
 
     if((sys.ioinit_pending = driver.ok == 0xFF)) {
-
-        hal_settings_changed = hal.settings_changed;
-        hal.settings_changed = settings_changed;
 
         driver.setup = hal.driver_setup(&settings);
 
@@ -475,12 +472,15 @@ FLASHMEM int grbl_enter (void)
             if(spindle_is_enabled(--spindle_num))
                 spindle_get(spindle_num)->param->override_pct = DEFAULT_SPINDLE_RPM_OVERRIDE; // Set to 100%
         } while(spindle_num);
+
         sys.flags.auto_reporting = settings.report_interval != 0;
+        sys.flags.mpg_auto_reporting = settings.mpg_report_interval != 0;
 
         if(settings.parking.flags.enabled)
             sys.override.control.parking_disable = settings.parking.flags.deactivate_upon_init;
 
         flush_override_buffers();
+        report_add_realtime(Report_Overrides);
 
         // Reset primary systems.
         hal.stream.reset_read_buffer();                 // Clear input stream buffer
@@ -545,7 +545,7 @@ __attribute__((always_inline)) static inline core_task_t *task_alloc (void)
     return task;
 }
 
-static void task_execute (sys_state_t state)
+void task_execute (bool wait)
 {
     static uint32_t last_ms = 0;
     static volatile bool lock = false;
@@ -563,18 +563,15 @@ static void task_execute (sys_state_t state)
         } while((task = task_run(task)));
     }
 
-    if(lock)
-        return;
-
-    lock = true;
-
     uint32_t now = hal.get_elapsed_ticks();
     if(!(now == last_ms || tasks.delayed == tasks.systick)) {
 
         last_ms = now;
 
         if((task = tasks.systick)) do {
-            task->fn(task->data);
+            if(!(task->lock++))
+                task->fn(task->data);
+            task->lock--;
         } while((task = task->next));
 
         while((task = tasks.delayed) && (int32_t)(task->time - now) <= 0) {
@@ -603,7 +600,17 @@ static void task_execute (sys_state_t state)
         }
     }
 
-    lock = false;
+    if(!lock) {
+
+        lock = true;
+
+        if(wait)
+            grbl.on_execute_delay(state_get());
+        else
+            grbl.on_execute_realtime(state_get());
+
+        lock = false;
+    }
 }
 
 ISR_CODE bool ISR_FUNC(task_add_delayed)(foreground_task_ptr fn, void *data, uint32_t delay_ms)
@@ -673,6 +680,7 @@ ISR_CODE bool ISR_FUNC(task_add_systick)(foreground_task_ptr fn, void *data)
 
         task->fn = fn;
         task->data = data;
+        task->lock = 0;
         task->next = NULL;
 
         if(tasks.systick == NULL)
@@ -690,14 +698,21 @@ ISR_CODE bool ISR_FUNC(task_add_systick)(foreground_task_ptr fn, void *data)
     return task != NULL;
 }
 
-FLASHMEM void task_delete_systick (foreground_task_ptr fn, void *data)
+/*! \brief Delete systick task.
+\param fn pointer to a \a foreground_task_ptr type of function.
+\param data pointer to data to be passed to the callee.
+\returns true if successful, false otherwise.
+NOTE: A systick task cannot delete itself.
+*/
+FLASHMEM bool task_delete_systick (foreground_task_ptr fn, void *data)
 {
+    bool ok = false;
     core_task_t *task, *prev = NULL;
 
     hal.irq_disable();
 
     if((task = tasks.systick)) do {
-        if(fn == task->fn && data == task->data) {
+        if((ok = fn == task->fn && data == task->data && !task->lock)) {
             if(prev)
                 prev->next = task->next;
             else
@@ -709,6 +724,8 @@ FLASHMEM void task_delete_systick (foreground_task_ptr fn, void *data)
     } while((task = task->next));
 
     hal.irq_enable();
+
+    return ok;
 }
 
 /*! \brief Enqueue a function to be called once by the foreground process.
@@ -857,7 +874,7 @@ FLASHMEM void task_execute_on_startup (void)
             hal.stream.on_linestate_changed = onPosFailure;
 
         while(true)
-            grbl.on_execute_realtime(state_get());
+            task_execute(false);
     }
 }
 

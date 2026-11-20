@@ -90,7 +90,6 @@ static struct {
     bool no_rx;
 } stats = {};
 
-static driver_reset_ptr driver_reset;
 static on_report_options_ptr on_report_options;
 static nvs_address_t nvs_address;
 
@@ -139,9 +138,6 @@ static void tx_message (volatile queue_entry_t *msg)
 // called once every ms
 static void modbus_poll (void *data)
 {
-    if(spin_lock)
-        return;
-
     spin_lock = true;
 
     switch(state) {
@@ -279,13 +275,13 @@ static bool modbus_send_rtu (modbus_message_t *msg, const modbus_callbacks_t *ca
         is_blocking = true;
 
         while(state != ModBus_Idle)
-            grbl.on_execute_realtime(state_get());
+            task_execute(false);
 
         tx_message(add_message(&sync_msg, msg, false, callbacks));
 
         while(is_blocking) {
 
-            grbl.on_execute_realtime(state_get());
+            task_execute(false);
 
             switch(state) {
 
@@ -340,11 +336,11 @@ static bool modbus_send_rtu (modbus_message_t *msg, const modbus_callbacks_t *ca
     return !block;
 }
 
-FLASHMEM static void modbus_reset (void)
+FLASHMEM static void modbus_rtu_reset (bool abort)
 {
     while(spin_lock);
 
-    if(sys.abort) {
+    if(abort) {
 
         if(packet) {
             memset((void *)&packet->callbacks, 0, sizeof(modbus_callbacks_t));
@@ -352,7 +348,7 @@ FLASHMEM static void modbus_reset (void)
         }
 
         tail = head;
-        silence_until = hal.get_elapsed_ticks() + 500;
+        silence_until = hal.get_elapsed_ticks() + modbus.rx_timeout + silence_timeout;
         state = ModBus_Silent;
 
         stream.flush_tx_buffer();
@@ -360,11 +356,9 @@ FLASHMEM static void modbus_reset (void)
     }
 
     if(state == ModBus_Retry) {
-        silence_until = hal.get_elapsed_ticks() + 500;
+        silence_until = hal.get_elapsed_ticks() + modbus.rx_timeout + silence_timeout;
         state = ModBus_Silent;
     }
-
-    driver_reset();
 }
 
 FLASHMEM static uint32_t get_baudrate (uint32_t rate)
@@ -458,7 +452,7 @@ FLASHMEM static void onReportOptions (bool newopt)
     on_report_options(newopt);
 
     if(!newopt)
-        report_plugin("MODBUS", "0.23");
+        report_plugin("MODBUS", "0.25");
 }
 
 static bool modbus_rtu_isup (void)
@@ -518,7 +512,7 @@ FLASHMEM static bool claim_stream (io_stream_properties_t const *sstream, void *
             claimed->set_enqueue_rt_handler(stream_buffer_all);
 
             stream.set_baud_rate = claimed->set_baud_rate;
-            stream.set_format = claimed->set_format;                              //!< Optional handler for setting the stream format.
+            stream.set_format = claimed->set_format;
             stream.get_tx_buffer_count = claimed->get_tx_buffer_count;
             stream.get_rx_buffer_count = claimed->get_rx_buffer_count;
             stream.write = claimed->write_n;
@@ -568,7 +562,8 @@ FLASHMEM void modbus_rtu_init (int8_t instance, int8_t dir_aux)
         .flush_queue = modbus_rtu_flush_queue,
         .set_silence = modbus_rtu_set_silence,
         .send = modbus_send_rtu,
-        .is_busy = modbus_is_busy
+        .is_busy = modbus_is_busy,
+        .reset = modbus_rtu_reset
     };
 
     static setting_details_t setting_details = {
@@ -582,7 +577,7 @@ FLASHMEM void modbus_rtu_init (int8_t instance, int8_t dir_aux)
     };
 
     PROGMEM static const sys_command_t command_list[] = {
-        {"MODBUSSTATS", report_stats, { .allow_blocking = On }, { .str = "output Modbus RTU statistics" } },
+        { "MODBUSSTATS", report_stats, { .allow_blocking = On }, { .str = "output Modbus RTU statistics" } },
     };
 
     static sys_commands_t commands = {
@@ -599,22 +594,20 @@ FLASHMEM void modbus_rtu_init (int8_t instance, int8_t dir_aux)
             xbar_t *dir_pin; // TODO: move to top and use for direct access
             io_port_cfg_t d_out;
 
-            ioports_cfg(&d_out, Port_Digital, Port_Output);
+            if(ioports_cfg(&d_out, Port_Digital, Port_Output)->n_ports) {
 
-            dir_port = dir_aux != -1 ? dir_aux : (d_out.n_ports ? d_out.n_ports - 1 : IOPORT_UNASSIGNED);
+                dir_port = dir_aux != -1 ? dir_aux : d_out.n_ports - 1;
 
-            if((dir_pin = d_out.claim(&d_out, &dir_port, NULL, (pin_cap_t){}))) {
-                stream.set_direction = modbus_set_direction;
-                ioport_set_function(dir_pin, Output_RS485_Direction, NULL);
+                if((dir_pin = d_out.claim(&d_out, &dir_port, NULL, (pin_cap_t){}))) {
+                    stream.set_direction = modbus_set_direction;
+                    ioport_set_function(dir_pin, Output_RS485_Direction, NULL);
+                }
             }
 
             hal.driver_cap.modbus_rtu = !!stream.set_direction;
         }
 
         if((hal.driver_cap.modbus_rtu = hal.driver_cap.modbus_rtu && task_add_systick(modbus_poll, NULL))) {
-
-            driver_reset = hal.driver_reset;
-            hal.driver_reset = modbus_reset;
 
             on_report_options = grbl.on_report_options;
             grbl.on_report_options = onReportOptions;

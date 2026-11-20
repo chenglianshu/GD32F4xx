@@ -1,0 +1,301 @@
+/*
+  longboard32.c - driver code for STM32F4xx ARM processors on Sienci SLB boards
+
+  Part of grblHAL
+
+  Copyright (c) 2024-2026 Terje Io
+  Copyright (c) 2022 Expatria Technologies
+
+  grblHAL is free software: you can redistribute it and/or modify
+  it under the terms of the GNU General Public License as published by
+  the Free Software Foundation, either version 3 of the License, or
+  (at your option) any later version.
+
+  grblHAL is distributed in the hope that it will be useful,
+  but WITHOUT ANY WARRANTY; without even the implied warranty of
+  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+  GNU General Public License for more details.
+
+  You should have received a copy of the GNU General Public License
+  along with grblHAL. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+#include "driver.h"
+
+#if defined(BOARD_LONGBOARD32) || defined(BOARD_LONGBOARD32_EXT)
+
+#ifndef SLB_TLS_AUX_INPUT
+#define SLB_TLS_AUX_INPUT 3
+#endif
+
+#include "grbl/task.h"
+#include "grbl/state_machine.h"
+
+#include "sdcard/sdcard.h"
+
+static driver_setup_ptr driver_setup;
+
+static void clear_ringleds (void *data)
+{
+    if(hal.rgb1.num_devices && hal.rgb1.out) {
+
+        uint_fast8_t idx;
+        for(idx = 0; idx < hal.rgb1.num_devices; idx++)
+            hal.rgb1.out(idx, (rgb_color_t){ .value = 0 });
+
+        hal.rgb1.write();
+    }
+}
+
+#if !TOOLSETTER_ENABLE
+
+static probe_state_t tls_input = {
+    .connected = On
+};
+
+static probe_state_t state = {
+    .connected = On
+};
+
+static bool probe_away, probe_configure = false;
+static xbar_t toolsetter;
+static on_report_options_ptr on_report_options;
+static probe_get_state_ptr hal_probe_get_state;
+static probe_configure_ptr hal_probe_configure;
+static probe_is_triggered_ptr hal_probe_is_triggered;
+
+static bool probeIsTriggered (probe_id_t probe_id)
+{
+    bool triggered = false;
+
+    if(probe_id == Probe_Toolsetter)
+        triggered = (bool)toolsetter.get_value(&toolsetter) ^ settings.probe.invert_toolsetter_input;
+    else
+        triggered = !!hal_probe_is_triggered && hal_probe_is_triggered(probe_id);
+
+    return triggered;
+}
+
+// redirected probing function for SLB OR.
+static probe_state_t getProbeState (void)
+{
+    // get the probe state from the HAL
+    state = hal_probe_get_state();
+
+    if(!probe_configure) {
+
+        // get the toolsetter state
+        tls_input.inverted = probe_away ? !settings.probe.invert_toolsetter_input : settings.probe.invert_toolsetter_input;
+        tls_input.triggered = (bool)toolsetter.get_value(&toolsetter) ^ tls_input.inverted;
+
+        // OR the result and return, unless it is an away probe in which case AND the result.
+        if(probe_away)
+            state.triggered &= tls_input.triggered;
+        else
+            state.triggered |= tls_input.triggered;
+    }
+
+    return state;
+}
+
+// redirected probing function for SLB OR.
+static void probeConfigure (bool is_probe_away, bool probing)
+{
+    tls_input.triggered = Off;
+    tls_input.is_probing = probing;
+    probe_away = is_probe_away;
+
+    if(hal_probe_configure) {
+        probe_configure = true;
+        hal_probe_configure(is_probe_away, probing);
+        probe_configure = false;
+    }
+}
+
+static void onReportOptions (bool newopt)
+{
+    on_report_options(newopt);
+
+    if(!newopt)
+        report_plugin("SLB Probing", "0.06");
+}
+
+#endif
+
+#if TRINAMIC_ENABLE
+
+static on_state_change_ptr on_state_change;
+
+static void onStateChanged (sys_state_t state)
+{
+    static bool estop = false;
+
+    if(estop && !(state & (STATE_ESTOP|STATE_ALARM))) {
+        estop = false;
+        if(hal.stepper.status)
+            hal.stepper.status(true);
+    }
+
+    if(state & (STATE_ESTOP))
+        estop = true;
+
+    if(on_state_change)
+        on_state_change(state);
+}
+
+#else
+
+static control_signals_get_state_ptr hal_control_get_state;
+static stepper_status_t stepper_status = {};
+
+typedef struct {
+    uint8_t n_pins;
+    struct {
+        uint8_t axis;
+        input_signal_t *input;
+    } motor[N_ABC_MOTORS + 3];
+} motor_pins_t;
+
+motor_pins_t fault_signals = {};
+
+void motor_fault_add_pin (input_signal_t *input, xbar_t *pin)
+{
+    fault_signals.motor[fault_signals.n_pins].input = input;
+    fault_signals.motor[fault_signals.n_pins++].axis = xbar_fault_pin_to_axis(input->id);
+}
+
+static void poll_motor_fault (void *data)
+{
+    stepper_status.fault.state = 0;
+
+    if(settings.motor_fault_enable.mask) {
+
+        uint_fast8_t idx;
+
+        task_add_delayed(poll_motor_fault, NULL, 25);
+
+        for(idx = 0; idx < fault_signals.n_pins; idx++) {
+            if(bit_istrue(settings.motor_fault_enable.mask, bit(fault_signals.motor[idx].axis))) {
+                input_signal_t *input = fault_signals.motor[idx].input;
+                input->mode.inverted = bit_istrue(settings.motor_fault_invert.mask, bit(fault_signals.motor[idx].axis));
+                if(DIGITAL_IN(input->port, input->pin) ^ input->mode.inverted)
+                    xbar_stepper_state_set(&stepper_status.fault, fault_signals.motor[idx].axis, input->id >= Input_MotorFaultX2);
+            }
+        }
+
+        if(stepper_status.fault.state && !(state_get() & (STATE_ALARM|STATE_ESTOP))) {
+            control_signals_t signals = hal_control_get_state();
+            signals.motor_fault = On;
+            hal.control.interrupt_callback(signals);
+        }
+    }
+}
+
+static stepper_status_t getDriverStatus (bool reset)
+{
+    if(reset)
+        stepper_status.fault.state = 0;
+
+    return stepper_status;
+}
+
+static control_signals_t getControlState (void)
+{
+    control_signals_t state = hal_control_get_state();
+
+    state.motor_fault = stepper_status.fault.state != 0;
+
+    return state;
+}
+
+#endif // TRINAMIC_ENABLE
+
+static bool driverSetup (settings_t *settings)
+{
+    if(!driver_setup(settings))
+        return false;
+
+    hal.homing.get_state = NULL; // for now, StallGuard sensorless homing not yet in use. Later check if sensorless homing is enabled.
+    hal.home_cap.a.bits = hal.home_cap.b.bits = 0;
+    xbar_set_homing_source();
+
+#if !TRINAMIC_ENABLE
+    if((hal.signals_cap.motor_fault = !!settings->motor_fault_enable.value && fault_signals.n_pins)) {
+
+        task_add_delayed(poll_motor_fault, NULL, 25);
+
+        hal.stepper.status = getDriverStatus;
+
+        hal_control_get_state = hal.control.get_state;
+        hal.control.get_state = getControlState;
+    }
+#endif
+
+    return true;
+}
+
+void board_init (void)
+{
+    xbar_t *port;
+
+#if defined(MODBUS_DIR_AUX) && !(MODBUS_ENABLE & MODBUS_RTU_DIR_ENABLED)
+
+    io_port_cfg_t d_out;
+
+    uint8_t modbus_dir = MODBUS_DIR_AUX;
+
+    if(ioports_cfg(&d_out, Port_Digital, Port_Output)->n_ports)
+        d_out.claim(&d_out, &modbus_dir, "N/A", (pin_cap_t){});
+
+#endif
+
+    hal.signals_pullup_disable_cap.probe_triggered = Off; // SLB has isolated inputs
+
+#if !TOOLSETTER_ENABLE
+
+    uint8_t tool_probe_port = SLB_TLS_AUX_INPUT;
+
+    io_port_cfg_t d_in;
+
+    if(ioports_cfg(&d_in, Port_Digital, Port_Input)->n_ports && (port = d_in.claim(&d_in, &tool_probe_port, NULL, (pin_cap_t){}))) {
+
+        ioport_set_function(port, Input_Toolsetter, NULL);
+
+        memcpy(&toolsetter, port, sizeof(xbar_t));
+
+        hal_probe_get_state = hal.probe.get_state;
+        hal.probe.get_state = getProbeState;
+
+        hal_probe_configure = hal.probe.configure;
+        hal.probe.configure = probeConfigure;
+
+        hal_probe_is_triggered = hal.probe.is_triggered;
+        hal.probe.is_triggered = probeIsTriggered;
+
+        on_report_options = grbl.on_report_options;
+        grbl.on_report_options = onReportOptions;
+
+        hal.driver_cap.toolsetter = On;
+    } else
+        task_run_on_startup(report_warning, "SLB toolsetter: configured port number is not available!");
+
+#endif
+
+    task_run_on_startup(clear_ringleds, NULL);
+
+    driver_setup = hal.driver_setup;
+    hal.driver_setup = driverSetup;
+
+#if TRINAMIC_ENABLE
+
+    on_state_change = grbl.on_state_change;
+    grbl.on_state_change = onStateChanged;
+
+#endif
+
+#if (FS_ENABLE & FS_SDCARD) && ETHERNET_ENABLE
+    sdcard_early_mount();
+#endif
+}
+
+#endif //BOARD_LONGBOARD32

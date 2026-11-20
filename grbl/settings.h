@@ -302,6 +302,8 @@ typedef enum {
     Setting_VFD_19 = 471,
     Setting_VFD_20 = 472,
     Setting_VFD_21 = 473,
+    Setting_VFD_22 = 474,
+    Setting_VFD_23 = 475,
 
     Setting_VFD_ModbusAddress0 = 476,
     Setting_VFD_ModbusAddress1 = 477,
@@ -465,11 +467,25 @@ typedef enum {
     // 683 - 689 - reserved for Sienci
 
     Setting_SubroutineOptions = 700,
+    Setting_RotaryOptions = 701,
+    Setting_CutterCompOptions = 702,
+    Setting_MPGAutoReportInterval = 703,
 
     Setting_SpindlePWMOptions1 = 709,
 
     Setting_SpindleInvertMask1 = 716,
 
+    Settings_MPG_BaudRate = 720,
+    Settings_MPG_Port = 721, // UART instance
+    // 722 - 729 reserved for MPG/pendant plugin code
+    Settings_MPG_0 = 722,
+    Settings_MPG_1 = 723,
+    Settings_MPG_2 = 724,
+    Settings_MPG_3 = 725,
+    Settings_MPG_4 = 726,
+    Settings_MPG_5 = 727,
+    Settings_MPG_6 = 728,
+    Settings_MPG_7 = 729,
     Setting_RpmMax1 = 730,
     Setting_RpmMin1 = 731,
     Setting_Mode1 = 732,
@@ -608,7 +624,12 @@ typedef union {
                  keep_rapids_override_on_reset   :1,
                  keep_feed_override_on_reset     :1,
                  m98_prescan_enable              :1,
-                 unassigned                      :8;
+                 rotary_fix_enable               :1,
+                 revert_metric_conversion        :1, // For rotary axes inch/min -> mm/min
+                 set_rpm_0_during_hold           :1,
+                 cc_lookahead_enable             :1, // For cutter compensation
+                 cc_chamfer_corner               :1, // For cutter compensation
+                 unassigned                      :3;
     };
 } settingflags_t;
 
@@ -648,7 +669,8 @@ typedef union {
                  run_substate       :1,
                  when_homing        :1,
                  distance_to_go     :1,
-                 unassigned         :2;
+                 extended           :1,
+                 unassigned         :1;
     };
 } reportmask_t;
 
@@ -864,6 +886,7 @@ typedef union {
 } macro_atc_flags_t;
 
 typedef struct {
+    uint8_t port; // UART instance
     uint8_t baud_rate;
     uint8_t stream_format;
     uint8_t rx_timeout;
@@ -920,7 +943,11 @@ typedef struct {
     uint16_t stepper_enable_delay; // Move to stepper_settings_t
     tool_id_t tool_id;
     serial_format_t modbus_stream_format; // TODO: remove in next version
-    char reserved[9];             // Reserved For future expansion
+    uint8_t mpg_baud_rate;
+    uint8_t mpg_uart_instance;    // Currently unused by the core.
+    uint8_t unused;
+    uint16_t mpg_report_interval;
+    char reserved[4];             // Reserved For future expansion
 } settings_t;
 
 typedef enum {
@@ -966,18 +993,19 @@ typedef enum {
     Group_Embroidery,           //!< 39
     Group_Panel,                //!< 40
     Group_Kinematics,           //!< 41
-    Group_Axis,                 //!< 42
+    Group_MPG,                  //!< 42
+    Group_Axis,                 //!< 43
 // NOTE: axis groups MUST be sequential AND last
-    Group_Axis0,                //!< 43
-    Group_XAxis = Group_Axis0,  //!< 44
-    Group_YAxis,                //!< 45
-    Group_ZAxis,                //!< 46
-    Group_AAxis,                //!< 47
-    Group_BAxis,                //!< 48
-    Group_CAxis,                //!< 49
-    Group_UAxis,                //!< 50
-    Group_VAxis,                //!< 51
-    Group_WAxis,                //!< 52
+    Group_Axis0,                //!< 44
+    Group_XAxis = Group_Axis0,  //!< 45
+    Group_YAxis,                //!< 46
+    Group_ZAxis,                //!< 47
+    Group_AAxis,                //!< 48
+    Group_BAxis,                //!< 49
+    Group_CAxis,                //!< 50
+    Group_UAxis,                //!< 51
+    Group_VAxis,                //!< 52
+    Group_WAxis,                //!< 53
     Group_Unknown = 99,         //!< 99
     Group_All = Group_Root      //!< 0
 } setting_group_t;
@@ -1013,7 +1041,8 @@ typedef enum {
     Setting_IsLegacy,
     Setting_IsLegacyFn,
     Setting_IsExpanded,
-    Setting_IsExpandedFn
+    Setting_IsExpandedFn,
+    Setting_MaxType = Setting_IsExpandedFn
 } setting_type_t;
 
 typedef union {
@@ -1083,7 +1112,21 @@ typedef void (*settings_changed_ptr)(settings_t *settings, settings_changed_flag
 typedef void (*driver_settings_load_ptr)(void);
 typedef void (*driver_settings_save_ptr)(void);
 typedef void (*driver_settings_restore_ptr)(void);
+
+/*! \brief Pointer to function to iterate over iterated settings.
+NOTES: The iterator should only iterate over available settings.
+If the callback returns false iteration should be terminated.
+\param settings pointer to \a setting_detail_t struct containing the setting data.
+\param callback a \a setting_output_ptr to be called for each iteration.
+\param data an optional pointer to data to be passed to the callback.
+\return \a false when false is returned by the callback else \a true.
+*/
 typedef bool (*driver_settings_iterator_ptr)(const setting_detail_t *setting, setting_output_ptr callback, void *data);
+
+/*! \brief Pointer to function to normalize iterated settings to the base settings id.
+\param id a \a setting_id_t enum value.
+\returns the base id if the id is recognized or 0 if not.
+*/
 typedef setting_id_t (*driver_settings_normalize_ptr)(setting_id_t id);
 
 typedef struct setting_details {
@@ -1128,7 +1171,7 @@ void settings_write_startup_line(uint8_t idx, char *line);
 bool settings_read_startup_line(uint8_t idx, char *line);
 
 // Writes build info user-defined string
-void settings_write_build_info(char *line);
+bool settings_write_build_info(char *line);
 
 // Reads build info user-defined string
 bool settings_read_build_info(char *line);
@@ -1147,7 +1190,7 @@ bool settings_override_acceleration (uint8_t axis, float acceleration);
 bool settings_override_jerk (uint8_t axis, float jerk);
 #endif
 
-void settings_register (setting_details_t *details);
+bool settings_register (setting_details_t *details);
 setting_details_t *settings_get_details (void);
 bool settings_is_group_available (setting_group_t group);
 bool settings_iterator (const setting_detail_t *setting, setting_output_ptr callback, void *data);

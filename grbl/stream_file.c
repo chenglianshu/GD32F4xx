@@ -3,7 +3,7 @@
 
   Part of grblHAL
 
-  Copyright (c) 2024-2025 Terje Io
+  Copyright (c) 2024-2026 Terje Io
 
   grblHAL is free software: you can redistribute it and/or modify
   it under the terms of the GNU General Public License as published by
@@ -25,9 +25,9 @@
 typedef struct rd_stream {
     vfs_file_t *file_new;
     vfs_file_t *file;
+    size_t position;
     line_number_t line_number;
     stream_read_ptr read;
-    stream_type_t type;
     status_message_ptr status_handler;
     on_file_end_ptr eof_handler;
     struct rd_stream *next;
@@ -136,19 +136,7 @@ FLASHMEM static void onReportHandlersInit (void)
     grbl.report.status_message = trap_status_messages;
 }
 
-FLASHMEM void stream_set_type (stream_type_t type, vfs_file_t *file)
-{
-    hal.stream.type = type;
-    if(!(hal.stream.file = file))
-        gc_state.file_stream = false;
-}
-
-FLASHMEM bool stream_is_file (void)
-{
-    return hal.stream.type == StreamType_File;
-}
-
-FLASHMEM vfs_file_t *stream_redirect_read (char *filename, status_message_ptr status_handler, on_file_end_ptr eof_handler)
+FLASHMEM vfs_file_t *stream_redirect_read (const char *filename, status_message_ptr status_handler, on_file_end_ptr eof_handler)
 {
     static bool error_handler_ok = false;
 
@@ -157,24 +145,21 @@ FLASHMEM vfs_file_t *stream_redirect_read (char *filename, status_message_ptr st
     if((file = vfs_open(filename, "r"))) {
         rd_stream_t *rd_stream, *streams = rd_streams;
         if((rd_stream = malloc(sizeof(rd_stream_t)))) {
-            rd_stream->line_number = rd_streams ? line_number : 0;
-            rd_stream->file = hal.stream.file;
-            rd_stream->type = hal.stream.type;
+            if((rd_stream->file = hal.stream.file))
+                rd_stream->position = vfs_tell(rd_stream->file);
             rd_stream->file_new = file;
+            rd_stream->line_number = rd_streams ? line_number : 0;
             rd_stream->read = hal.stream.read;
             rd_stream->eof_handler = eof_handler;
             rd_stream->status_handler = status_handler;
             rd_stream->next = NULL;
-            hal.stream.read = stream_read_file;
-            stream_set_type(StreamType_File, file);
+            stream_set_file(file, stream_read_file);
             if(streams == NULL)
                 rd_streams = rd_stream;
-            else do {
-                if(streams->next == NULL) {
-                    streams->next = rd_stream;
-                    break;
-                }
-            } while((streams = streams->next));
+            else {
+                while(streams->next && (streams = streams->next));
+                streams->next = rd_stream;
+            }
             line_number = 0;
         } else {
             vfs_close(file);
@@ -218,7 +203,7 @@ FLASHMEM void stream_redirect_close (vfs_file_t *file)
             vfs_close(file);
             if((hal.stream.read = stream->read) == stream_read_file)
                 line_number = stream->line_number;
-            stream_set_type(stream->type, stream->file);
+            stream_set_file(stream->file, stream->read);
             if(stream == rd_streams)
                 rd_streams = stream->next;
             else

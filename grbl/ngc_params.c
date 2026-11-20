@@ -45,7 +45,6 @@
 #endif
 
 typedef float (*ngc_param_get_ptr)(ngc_param_id_t id);
-typedef float (*ngc_named_param_get_ptr)(void);
 
 typedef struct {
     ngc_param_id_t id_min;
@@ -73,6 +72,13 @@ typedef struct ngc_named_rw_param {
     struct ngc_named_rw_param *next;
 } ngc_named_rw_param_t;
 
+typedef struct ngc_virtual_param {
+    const char *name;
+    ngc_named_param_get_ptr get;
+    ngc_named_param_set_ptr set;
+    struct ngc_virtual_param *next;
+} ngc_virtual_param_t;
+
 typedef struct ngc_string_param {
     struct ngc_string_param *next;
     ngc_string_id_t id;
@@ -94,6 +100,7 @@ static ngc_rw_param_t *rw_params = NULL;
 static ngc_named_rw_param_t *rw_global_params = NULL;
 static ngc_string_id_t ref_id = (uint32_t)-1;
 static ngc_string_param_t *ngc_string_params = NULL;
+static ngc_virtual_param_t *ngc_virtual_params = NULL;
 static on_macro_execute_ptr on_macro_execute;
 
 PROGMEM static const uint8_t axis_map[] = {
@@ -141,14 +148,14 @@ PROGMEM static const uint8_t axis_map[] = {
 
 FLASHMEM static float _convert_pos (float value, uint_fast8_t axis)
 {
-    return settings.flags.report_inches && bit_isfalse(settings.steppers.is_rotary.mask, bit(axis)) ? value * 25.4f : value;
+    return gc_state.modal.units_imperial && bit_isfalse(settings.steppers.is_rotary.mask, bit(axis)) ? value * INCH_PER_MM : value;
 }
 
 #else
 
 FLASHMEM static inline float _convert_pos (float value, uint_fast8_t axis)
 {
-    return settings.flags.report_inches ? value * 25.4f : value;
+    return gc_state.modal.units_imperial ? value * INCH_PER_MM : value;
 }
 
 #endif
@@ -219,6 +226,30 @@ FLASHMEM static float tool_offset (ngc_param_id_t id)
 
     return axis <= 9 ? gc_state.modal.tool_length_offset[axis] : 0.0f;
 }
+
+FLASHMEM static float tool_diameter (ngc_param_id_t id)
+{
+    return gc_state.tool->radius * 2.0f;
+}
+
+#if LATHE_UVW_OPTION
+
+FLASHMEM static float tool_front_angle (ngc_param_id_t id)
+{
+    return gc_state.tool->front_angle;
+}
+
+FLASHMEM static float tool_back_angle (ngc_param_id_t id)
+{
+    return gc_state.tool->back_angle;
+}
+
+FLASHMEM static float tool_orientation (ngc_param_id_t id)
+{
+    return (float)gc_state.tool->orientation;
+}
+
+#endif
 
 FLASHMEM static float g28_home (ngc_param_id_t id)
 {
@@ -318,6 +349,12 @@ PROGMEM static const ngc_ro_param_t ngc_ro_params[] = {
     { .id_min = 5399, .id_max = 5399, .get = m66_result },          // LinuxCNC
     { .id_min = 5400, .id_max = 5400, .get = tool_number },         // LinuxCNC
     { .id_min = 5401, .id_max = 5409, .get = tool_offset },         // LinuxCNC
+    { .id_min = 5410, .id_max = 5410, .get = tool_diameter },       // LinuxCNC
+#if LATHE_UVW_OPTION
+    { .id_min = 5411, .id_max = 5411, .get = tool_front_angle },    // LinuxCNC
+    { .id_min = 5412, .id_max = 5412, .get = tool_back_angle },     // LinuxCNC
+    { .id_min = 5413, .id_max = 5413, .get = tool_orientation },    // LinuxCNC
+#endif
     { .id_min = 5420, .id_max = 5428, .get = work_position },       // LinuxCNC
     { .id_min = 5599, .id_max = 5599, .get = debug_output }         // LinuxCNC
 };
@@ -482,7 +519,7 @@ FLASHMEM float ngc_named_param_get_by_id (ncg_name_param_id_t id)
             break;
 
         case NGCParam_motion_mode:
-            value = (float)(gc_state.modal.motion * 10); // TODO: Fix G38.x
+            value = (float)gc_state.modal.motion;
             break;
 
         case NGCParam_plane:
@@ -490,35 +527,39 @@ FLASHMEM float ngc_named_param_get_by_id (ncg_name_param_id_t id)
             break;
 
         case NGCParam_ccomp:
+#if CUTTER_COMP_ENABLE
+            value = 400.0f + (float)(gc_state.modal.cutter_comp.side * 10 + gc_state.modal.cutter_comp.dynamic);
+#else
             value = 400.0f;
+#endif
             break;
 
         case NGCParam_metric:
-            value = gc_state.modal.units_imperial ? 0.0f : 1.0f;
+            value = (float)!gc_state.modal.units_imperial;
             break;
 
         case NGCParam_imperial:
-            value = gc_state.modal.units_imperial ? 1.0f : 0.0f;
+            value = (float)gc_state.modal.units_imperial;
             break;
 
         case NGCParam_absolute:
-            value = gc_state.modal.distance_incremental ? 0.0f : 1.0f;
+            value = (float)!gc_state.modal.distance_incremental;
             break;
 
         case NGCParam_incremental:
-            value = gc_state.modal.distance_incremental ? 1.0f : 0.0f;
+            value = (float)gc_state.modal.distance_incremental;
             break;
 
         case NGCParam_inverse_time:
-            value = gc_state.modal.feed_mode == FeedMode_InverseTime ? 1.0f : 0.0f;
+            value = (float)(gc_state.modal.feed_mode == FeedMode_InverseTime);
             break;
 
         case NGCParam_units_per_minute:
-            value = gc_state.modal.feed_mode == FeedMode_UnitsPerMin ? 1.0f : 0.0f;
+            value = (float)(gc_state.modal.feed_mode == FeedMode_UnitsPerMin);
             break;
 
         case NGCParam_units_per_rev:
-            value = gc_state.modal.feed_mode == FeedMode_UnitsPerRev ? 1.0f : 0.0f;
+            value = (float)(gc_state.modal.feed_mode == FeedMode_UnitsPerRev);
             break;
 
         case NGCParam_coord_system:
@@ -533,23 +574,23 @@ FLASHMEM float ngc_named_param_get_by_id (ncg_name_param_id_t id)
             break;
 
         case NGCParam_tool_offset:
-            value = gc_state.modal.tool_offset_mode >= ToolLengthOffset_Enable ? 1.0f : 0.0f;
+            value = (float)(gc_state.modal.tool_offset_mode >= ToolLengthOffset_Enable);
             break;
 
         case NGCParam_retract_r_plane:
-            value = gc_state.modal.retract_mode == CCRetractMode_Previous ? 1.0f : 0.0f;
+            value = (float)(gc_state.modal.retract_mode == CCRetractMode_Previous);
             break;
 
         case NGCParam_retract_old_z:
-            value = gc_state.modal.retract_mode == CCRetractMode_RPos ? 1.0f : 0.0f;
+            value = (float)(gc_state.modal.retract_mode == CCRetractMode_RPos);
             break;
 
         case NGCParam_spindle_rpm_mode:
-            value = gc_spindle_get(0)->rpm_mode == SpindleSpeedMode_RPM ? 1.0f : 0.0f;
+            value = (float)(gc_spindle_get(0)->rpm_mode == SpindleSpeedMode_RPM);
             break;
 
         case NGCParam_spindle_css_mode:
-            value = gc_spindle_get(0)->rpm_mode == SpindleSpeedMode_CSS ? 1.0f : 0.0f;
+            value = (float)(gc_spindle_get(0)->rpm_mode == SpindleSpeedMode_CSS);
             break;
 
         case NGCParam_ijk_absolute_mode:
@@ -557,35 +598,35 @@ FLASHMEM float ngc_named_param_get_by_id (ncg_name_param_id_t id)
             break;
 
         case NGCParam_lathe_diameter_mode:
-            value = gc_state.modal.diameter_mode ? 1.0f : 0.0f;
+            value = (float)gc_state.modal.diameter_mode;
             break;
 
         case NGCParam_lathe_radius_mode:
-            value = gc_state.modal.diameter_mode ? 0.0f : 1.0f;
+            value = (float)!gc_state.modal.diameter_mode ;
             break;
 
         case NGCParam_spindle_on:
-            value = gc_spindle_get(0)->state.on ? 1.0f : 0.0f;
+            value = (float)gc_spindle_get(0)->state.on;
             break;
 
         case NGCParam_spindle_cw:
-            value = gc_spindle_get(0)->state.ccw ? 1.0f : 0.0f;
+            value = (float)!gc_spindle_get(0)->state.ccw;
             break;
 
         case NGCParam_mist:
-            value = gc_state.modal.coolant.mist ? 1.0f : 0.0f;
+            value = (float)gc_state.modal.coolant.mist;
             break;
 
         case NGCParam_flood:
-            value = gc_state.modal.coolant.flood ? 1.0f : 0.0f;
+            value = (float)gc_state.modal.coolant.flood;
             break;
 
         case NGCParam_speed_override:
-            value = gc_state.modal.override_ctrl.spindle_rpm_disable ? 0.0f : 1.0f;
+            value = (float)!gc_state.modal.override_ctrl.spindle_rpm_disable;
             break;
 
         case NGCParam_feed_override:
-            value = gc_state.modal.override_ctrl.feed_rates_disable ? 0.0f : 1.0f;
+            value = (float)!gc_state.modal.override_ctrl.feed_rates_disable;
             break;
 
         case NGCParam_adaptive_feed:
@@ -593,7 +634,7 @@ FLASHMEM float ngc_named_param_get_by_id (ncg_name_param_id_t id)
             break;
 
         case NGCParam_feed_hold:
-            value = gc_state.modal.override_ctrl.feed_hold_disable ? 0.0f : 1.0f;
+            value = (float)!gc_state.modal.override_ctrl.feed_hold_disable;
             break;
 
         case NGCParam_feed:
@@ -741,11 +782,21 @@ FLASHMEM bool ngc_named_param_get (char *name, float *value)
 
     *value = 0.0f;
 
-     if(*name == '_') do {
-        idx--;
-        if((found = !strcmp(name, ngc_named_ro_param[idx].name)))
-            *value = ngc_named_param_get_by_id(ngc_named_ro_param[idx].id);
-    } while(idx && !found);
+    if(*name == '_') {
+        do {
+            idx--;
+            if((found = !strcmp(name, ngc_named_ro_param[idx].name)))
+                *value = ngc_named_param_get_by_id(ngc_named_ro_param[idx].id);
+        } while(idx && !found);
+
+        if(!found && ngc_virtual_params) {
+            ngc_virtual_param_t *vp = ngc_virtual_params;
+            do {
+                if((found = !strcmp(name, vp->name)))
+                    *value = vp->get();
+            } while(!found && (vp = vp->next));
+        }
+    }
 
     if(!found) {
         void *context = *name == '_' ? NULL : call_context;
@@ -768,7 +819,7 @@ FLASHMEM bool ngc_named_param_exists (char *name)
     return ngc_named_param_get(name, &value);
 }
 
-FLASHMEM float *ngc_named_param_set (char *name, float value)
+FLASHMEM bool ngc_named_param_set (char *name, float value)
 {
     bool ok = false;
     uint_fast8_t idx = sizeof(ngc_named_ro_param) / sizeof(ngc_named_ro_param_t);
@@ -781,14 +832,32 @@ FLASHMEM float *ngc_named_param_set (char *name, float value)
 
     ngc_named_rw_param_t *rw_param = NULL;
 
-    // Check if it is a (read only) predefined parameter.
-    if(*name == '_') do {
-        idx--;
-        ok = !strcmp(name, ngc_named_ro_param[idx].name);
-    } while(idx && !ok);
+    if(*name == '_') {
+
+        // Check if it is a (read only) predefined parameter.
+        do {
+            ok = !strcmp(name, ngc_named_ro_param[--idx].name);
+        } while(idx && !ok);
+
+        // Check if it is a virtual parameter, if is and not read only set it.
+        if(!ok && ngc_virtual_params) {
+            ngc_virtual_param_t *vp = ngc_virtual_params;
+            do {
+                if((ok = !strcmp(name, vp->name))) {
+                    if(vp->set) {
+                        vp->set(value);
+                        return true;
+                    }
+                }
+            } while(!ok && (vp = vp->next));
+        }
+    }
+
+    if(ok)
+        return false;
 
     // If not predefined attempt to set it.
-    if(!ok && (ok = strlen(name) <= NGC_MAX_PARAM_LENGTH)) {
+    if(strlen(name) <= NGC_MAX_PARAM_LENGTH) {
 
         void *context = *name == '_' ? NULL : call_context;
         ngc_named_rw_param_t *rw_param_last = rw_global_params;
@@ -814,11 +883,42 @@ FLASHMEM float *ngc_named_param_set (char *name, float value)
                 rw_param_last->next = rw_param;
          }
 
-         if((ok = rw_param != NULL))
+         if((ok = !!rw_param))
              rw_param->value = value;
     }
 
-    return ok ? &rw_param->value : NULL;
+    return ok;
+}
+
+FLASHMEM static bool _virtual_param_add (const char *name, ngc_named_param_get_ptr get_value, ngc_named_param_set_ptr set_value)
+{
+    ngc_virtual_param_t *vp = NULL, *add;
+
+    if(get_value && name && *name == '_' && !ngc_named_param_exists((char *)name) && (vp = malloc(sizeof(ngc_virtual_param_t)))) {
+
+        vp->name = name;
+        vp->get = get_value;
+        vp->set = set_value;
+        vp->next = NULL;
+
+        if((add = ngc_virtual_params)) {
+            while(add->next && (add = add->next));
+            add->next = vp;
+        } else
+            ngc_virtual_params = vp;
+    }
+
+    return !!vp;
+}
+
+FLASHMEM bool ngc_virtual_rw_param_add (const char *name, ngc_named_param_get_ptr get_value, ngc_named_param_set_ptr set_value)
+{
+    return !!set_value && _virtual_param_add(name, get_value, set_value);
+}
+
+FLASHMEM bool ngc_virtual_ro_param_add (const char *name, ngc_named_param_get_ptr get_value)
+{
+    return _virtual_param_add(name, get_value, NULL);
 }
 
 FLASHMEM static ngc_string_param_t *sp_get_by_name (char *name)
@@ -950,6 +1050,8 @@ FLASHMEM bool ngc_modal_state_save (gc_modal_t *state, gc_override_values_t *ove
         *saved_state = malloc(sizeof(gc_modal_snapshot_t));
 
     if(*saved_state) {
+        if(grbl.on_modal_state_action)
+            grbl.on_modal_state_action(ModalState_Save, (modal_groups_t){0}, *saved_state);
         memcpy(&(*saved_state)->modal, state, sizeof(gc_modal_t));
         memcpy(&(*saved_state)->override, overrides, sizeof(gc_override_values_t));
         (*saved_state)->modal.feed_rate = feed_rate;
@@ -964,6 +1066,8 @@ FLASHMEM void ngc_modal_state_invalidate (void)
     gc_modal_snapshot_t **saved_state = call_level == -1 ? &modal_state : &call_levels[call_level].modal_state;
 
     if(*saved_state) {
+        if(grbl.on_modal_state_action)
+            grbl.on_modal_state_action(ModalState_Invalidate, (modal_groups_t){0}, *saved_state);
         free(*saved_state);
         *saved_state = NULL;
     }
@@ -1164,10 +1268,10 @@ static void modbus_response_handler (modbus_response_t *response)
     ngc_named_param_set("_value", (float)(response->exception ? response->exception : response->values[0]));
     ngc_named_param_set("_value_returned", response->exception ? 0.0f : (float)response->num_values);
     if(response->exception == ModBus_NoException) {
-        if(response->num_values == 2)
+        if(response->num_values > 1)
             ngc_named_param_set("_value2", (float)(response->exception ? response->exception : response->values[1]));
         if(response->num_values == 3)
-            ngc_named_param_set("_value2", (float)(response->exception ? response->exception : response->values[2]));
+            ngc_named_param_set("_value3", (float)(response->exception ? response->exception : response->values[2]));
     }
 }
 
@@ -1175,16 +1279,15 @@ FLASHMEM static status_code_t macro_modbus_msg (parameter_words_t args)
 {
     float tmpvar;
     status_code_t status = Status_OK;
+    const modbus_function_properties_t *p;
 
     if(!(args.f && args.s))
         status = Status_GcodeValueWordMissing;
-    else if(ngc_param_get(9 /* F word -> function */, &tmpvar)) {
+    else if(ngc_param_get(9 /* F word -> function */, &tmpvar) && (p = modbus_get_function_properties((modbus_function_t)tmpvar))) {
 
         uint16_t server, address = 0, n_values = 0, values[MODBUS_MAX_REGISTERS];
 
-        const modbus_function_properties_t *p = modbus_get_function_properties((modbus_function_t)tmpvar);
-
-        if(p->function != ModBus_ReadExceptionStatus && p->function && args.r && ngc_param_get(18 /* R word - register address */, &tmpvar)) {
+        if(p->function != ModBus_ReadExceptionStatus && args.r && ngc_param_get(18 /* R word - register address */, &tmpvar)) {
 
             address = (uint16_t)tmpvar;
 
@@ -1192,6 +1295,8 @@ FLASHMEM static status_code_t macro_modbus_msg (parameter_words_t args)
 
                 if(args.a && ngc_param_get(1 /* A word - first register value */, &tmpvar))
                     values[n_values++] = (uint16_t)tmpvar;
+                else
+                    return Status_GcodeValueOutOfRange;
 
                 if(!p->single_register) {
                     if(args.b && ngc_param_get(2 /* B word - second register value */, &tmpvar))
@@ -1199,8 +1304,15 @@ FLASHMEM static status_code_t macro_modbus_msg (parameter_words_t args)
                     if(args.c && ngc_param_get(3 /* C word - third register value */, &tmpvar))
                         values[n_values++] = (uint16_t)tmpvar;
                 }
-            } else if(args.x && ngc_param_get(24 /* X word - number of registers to read */, &tmpvar)) {
-                if((n_values = (uint16_t)tmpvar) > MODBUS_MAX_REGISTERS)
+                if(p->packed) {
+                    if(args.x && ngc_param_get(24 /* X word - number of bits to write */, &tmpvar)) {
+                        if((uint16_t)tmpvar > 16)
+                            return Status_GcodeValueOutOfRange;
+                        n_values = (uint16_t)tmpvar;
+                    }
+                }
+            } else if(args.x && ngc_param_get(24 /* X word - number of registers or bits to read */, &tmpvar)) {
+                if((n_values = (uint16_t)tmpvar) > MODBUS_MAX_REGISTERS * (p->packed ? 8 : 1))
                     return Status_GcodeValueOutOfRange;
             } else
                 n_values = 1;

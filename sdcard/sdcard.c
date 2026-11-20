@@ -49,7 +49,7 @@ static sdcard_events_t sdcard;
 static on_realtime_report_ptr on_realtime_report;
 static on_report_options_ptr on_report_options;
 static driver_setup_ptr driver_setup;
-static settings_changed_ptr settings_changed;
+static settings_changed_ptr on_settings_changed;
 
 static void onRealtimeReport (stream_write_ptr stream_write, report_tracking_flags_t report);
 
@@ -98,7 +98,7 @@ FLASHMEM static bool sdcard_mount (void)
 
 FLASHMEM static void sdcard_auto_mount (void *data)
 {
-    if(device.fs == NULL && !sdcard_mount())
+    if(settings.fs_options.sd_mount_on_boot && device.fs == NULL && !sdcard_mount())
         report_message("SD card automount failed", Message_Info);
 }
 
@@ -169,9 +169,9 @@ FLASHMEM static void sd_detect_pin (xbar_t *pin, void *data)
 
 FLASHMEM static void onSettingsChanged (settings_t *settings, settings_changed_flags_t changed)
 {
-    static bool mount_attempted = false; // in case some other code hooked into hal.settings_changed
+    static bool mount_attempted = false; // in case some other code hooked into grbl.on_settings_changed
 
-    settings_changed(settings, changed);
+    on_settings_changed(settings, changed);
 
     if(!mount_attempted) {
         mount_attempted = true;
@@ -183,13 +183,13 @@ FLASHMEM static bool onDriverSetup (settings_t *settings)
 {
     bool ok;
 
-    settings_changed = hal.settings_changed;
-    hal.settings_changed = onSettingsChanged;
+    on_settings_changed = grbl.on_settings_changed;
+    grbl.on_settings_changed = onSettingsChanged;
 
     ok = driver_setup(settings);
 
-    if(hal.settings_changed == onSettingsChanged)
-        hal.settings_changed = settings_changed;
+    if(grbl.on_settings_changed == onSettingsChanged)
+        grbl.on_settings_changed = on_settings_changed;
 
     return ok;
 }
@@ -198,7 +198,7 @@ FLASHMEM static bool onDriverSetup (settings_t *settings)
 FLASHMEM void sdcard_early_mount (void)
 {
     if(detect_pin == NULL || detect_pin->get_value(detect_pin) == 0.0f) {
-        if (driver_setup == NULL){ //has not been called
+        if(driver_setup == NULL) { //has not been called
 			driver_setup = hal.driver_setup;
 			hal.driver_setup = onDriverSetup;
 		}
@@ -212,7 +212,7 @@ FLASHMEM static void onReportOptions (bool newopt)
     if(newopt)
         hal.stream.write(",SD");
     else
-        report_plugin("SDCARD", "1.28");
+        report_plugin("SDCARD", "1.29");
 }
 
 FLASHMEM sdcard_events_t *sdcard_init (void)
@@ -247,8 +247,7 @@ FLASHMEM sdcard_events_t *sdcard_init (void)
     errors_register(&error_details);
     system_register_commands(&sdcard_commands);
 
-    if(settings.fs_options.sd_mount_on_boot)
-        task_run_on_startup(sdcard_auto_mount, NULL);
+    task_run_on_startup(sdcard_auto_mount, NULL);
 
     return &sdcard;
 }

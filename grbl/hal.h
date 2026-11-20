@@ -3,7 +3,7 @@
 
   Part of grblHAL
 
-  Copyright (c) 2016-2025 Terje Io
+  Copyright (c) 2016-2026 Terje Io
 
   grblHAL is free software: you can redistribute it and/or modify
   it under the terms of the GNU General Public License as published by
@@ -53,7 +53,6 @@ typedef union {
                  limits_pull_up              :1, //!< Pullup resistors for limit inputs are are supported.
                  control_pull_up             :1, //!< Pullup resistors for control inputs are supported.
                  probe_pull_up               :1, //!< Pullup resistors for probe inputs are supported.
-                 amass_level                 :2, // 0...3 Deprecated?
                  spindle_encoder             :1, //!< Spindle encoder is supported.
                  spindle_encoder_index_event :1, //!< Spindle encoder is supported.
                  spindle_sync                :1, //!< Spindle synced motion is supported.
@@ -77,7 +76,7 @@ typedef union {
                  rtc_set                     :1,
                  bltouch_probe               :1,
                  modbus_rtu                  :1, // Modbus RTU stream is enabled.
-                 unassigned                  :3;
+                 unassigned                  :5;
     };
 } driver_cap_t;
 
@@ -480,16 +479,17 @@ typedef enum {
 } timer_resolution_t;
 
 typedef union {
-    uint8_t value; //!< All bitmap flags.
+    uint16_t value; //!< All bitmap flags.
     struct {
-        uint8_t periodic :1, //!<
-                up       :1, //!< Timer supports upcounting
-                comp1    :1, //!< Timer supports compare interrupt 0
-                comp2    :1, //!< Timer supports compare interrupt 1
-                comp3    :1, //!< Timer supports compare interrupt 2
-                ext_clk  :1, //!< External clock supported
-                encoder  :1, //!< Encoder mode supported
-                unused   :1;
+        uint16_t periodic   :1, //!<
+                 resolution :2, //!< timer_resolution_t
+                 up         :1, //!< Timer supports upcounting
+                 comp1      :1, //!< Timer supports compare interrupt 0
+                 comp2      :1, //!< Timer supports compare interrupt 1
+                 comp3      :1, //!< Timer supports compare interrupt 2
+                 ext_clk    :1, //!< External clock supported
+                 encoder    :1, //!< Encoder mode supported
+                 unused     :7;
     };
 } timer_cap_t;
 
@@ -547,6 +547,11 @@ typedef struct {
  *  RTC (Real Time Clock  *
  **************************/
 
+/*! \brief Pointer to function for getting the current time.
+\param datetime pointer to a \a timeval struct.
+\\returns \a true if successful.
+*/typedef bool (*rtc_get_time_ptr)(struct timeval *time);
+
 /*! \brief Pointer to function for setting the current datetime.
 \param datetime pointer to a \a tm struct.
 \\returns \a true if successful.
@@ -560,6 +565,7 @@ typedef bool (*rtc_get_datetime_ptr)(struct tm *datetime);
 typedef bool (*rtc_set_datetime_ptr)(struct tm *datetime);
 
 typedef struct {
+    rtc_get_time_ptr get_time;          //!< Optional handler getting the current time.
     rtc_get_datetime_ptr get_datetime;  //!< Optional handler getting the current datetime.
     rtc_set_datetime_ptr set_datetime;  //!< Optional handler setting the current datetime.
 } rtc_ptrs_t;
@@ -651,7 +657,6 @@ typedef struct {
     spindle_data_ptrs_t spindle_data;       //!< Handlers for getting/resetting spindle data (RPM, angular position, ...).
     stepper_ptrs_t stepper;                 //!< Handlers for stepper motors.
     io_stream_t stream;                     //!< Handlers for stream I/O.
-    settings_changed_ptr settings_changed;  //!< Deprecated, hook into grbl.on_settings_changed in new code.
     probe_ptrs_t probe;                     //!< Optional handlers for probe input(s).
     tool_ptrs_t tool;                       //!< Optional handlers for tool changes.
     timer_ptrs_t timer;                     //!< Optional handlers for claiming and controlling timers.

@@ -33,7 +33,7 @@
 #include "tool_change.h"
 #include "state_machine.h"
 #ifdef KINEMATICS_API
-#include "kinematics.h"
+#include "kinematics/interface.h"
 #endif
 
 #include "config.h"
@@ -203,7 +203,7 @@ FLASHMEM static bool limits_pull_off (axes_signals_t axis, coord_data_t *distanc
     // Bypass mc_line(). Directly plan homing motion.
 #ifdef KINEMATICS_API
     coord_data_t k_target;
-    plan_buffer_line(kinematics.transform_from_cartesian(k_target.values, target.values), &plan_data);
+    plan_buffer_line(kinematics.transform_from_cartesian(&k_target, &target)->values, &plan_data);
 #else
     plan_buffer_line(target.values, &plan_data);
 #endif
@@ -247,7 +247,7 @@ FLASHMEM static bool limits_pull_off (axes_signals_t axis, coord_data_t *distanc
             }
         }
 
-        grbl.on_execute_realtime(STATE_HOMING);
+        task_execute(false);
     }
 
     st_reset(); // Immediately force kill steppers and reset step segment buffer.
@@ -386,7 +386,7 @@ FLASHMEM static bool homing_cycle (axes_signals_t cycle, axes_signals_t auto_squ
 
 #ifdef KINEMATICS_API
         coord_data_t k_target;
-        plan_buffer_line(kinematics.transform_from_cartesian(k_target.values, target.values), &plan_data);    // Bypass mc_line(). Directly plan homing motion.;
+        plan_buffer_line(kinematics.transform_from_cartesian(&k_target, &target)->values, &plan_data);    // Bypass mc_line(). Directly plan homing motion.;
 #else
         plan_buffer_line(target.values, &plan_data);    // Bypass mc_line(). Directly plan homing motion.
 #endif
@@ -477,7 +477,7 @@ FLASHMEM static bool homing_cycle (axes_signals_t cycle, axes_signals_t auto_squ
                 }
             }
 
-            grbl.on_execute_realtime(STATE_HOMING);
+            task_execute(STATE_HOMING);
 
         } while(axislock.mask & AXES_BITMASK);
 
@@ -733,7 +733,7 @@ static bool check_arc_travel_limits (coord_data_t *target, coord_data_t *positio
         end.y = position->values[plane.axis_1] - center.y;
     }
 
-    if(labs(turns > 1))
+    if(labs(turns) > 1)
         x.value = 0b1111;                   // Crosses all
     else if(start.y >= 0.0f) {
         if(start.x > 0.0f) {                // Starts in Q1

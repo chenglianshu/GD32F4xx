@@ -28,6 +28,7 @@ Helper functions for saving away and restoring a stream input buffer. _Not refer
 #ifndef _STREAM_H_
 #define _STREAM_H_
 
+#define ASCII_NUL  0x00
 #define ASCII_SOH  0x01
 #define ASCII_STX  0x02
 #define ASCII_ETX  0x03
@@ -77,17 +78,14 @@ Helper functions for saving away and restoring a stream input buffer. _Not refer
 #include <stdint.h>
 #include <stdbool.h>
 
+#include "probe.h"
 #include "vfs.h"
 
 typedef enum {
     StreamType_Serial = 0,
-    StreamType_MPG,
     StreamType_Bluetooth,
     StreamType_Telnet,
     StreamType_WebSocket,
-    StreamType_File,
-    StreamType_SDCard = StreamType_File, // deprecated, use StreamType_File instead
-    StreamType_Redirected,
     StreamType_Null
 } stream_type_t;
 
@@ -190,7 +188,8 @@ typedef union {
                  probe_id       :1, //!< Probe changed.
                  distance_to_go :1, //!< Distance to go.
                  probe_protect  :1, //!< Probe protection state changed.
-                 unassigned     :8, //
+                 unassigned     :7, //
+                 extended       :1, //!< 0x80 request
                  force_wco      :1, //!< Add work coordinates (due to WCO changed during motion).
                  cycle_start    :1, //!< Cycle start signal triggered. __NOTE:__ do __NOT__ add to Report_All enum above!
                  all            :1; //!< Set when CMD_STATUS_REPORT_ALL is requested, may be used by user code.
@@ -201,6 +200,7 @@ typedef struct {
     report_tracking_flags_t flags;
     uint8_t override_counter;       //!< Tracks when to add override data to status reports.
     uint8_t wco_counter;            //!< Tracks when to add work coordinate offset data to status reports.
+    probe_states_t probe_states;    //!< Last polled probe triggered state for all available probes.
 } status_report_tracking_t;
 
 struct io_stream_properties;
@@ -355,7 +355,7 @@ typedef union {
                 utf8              :1, //!< Set when stream is in UTF8 mode.
                 eof               :1, //!< Set when a file stream reaches end-of-file.
                 m98_macro_prescan :1, //!< Set when prescanning gcode for M98 macro definitions.
-                unused            :1;
+                is_mpg            :1; //!< Set when stream is redirected to MPG.
     };
 } io_stream_state_t;
 
@@ -392,8 +392,9 @@ typedef struct {
 typedef struct {
     io_stream_state_t state;                                //!< Optional status flags such as connected status.
     io_stream_flags_t flags;                                //!< Stream capability flags.
+    serial_format_t format;                                 //!< Stream format: data length (bits), parity, stop bits.
     uint32_t baud_rate;
-    serial_format_t format;
+    uint32_t last_status_request;                           //!< Timestamp of last status request received.
 } io_stream_status_t;
 
 typedef const io_stream_t *(*stream_claim_ptr)(uint32_t baud_rate);
@@ -401,12 +402,12 @@ typedef bool (*stream_release_ptr)(uint8_t instance);
 typedef const io_stream_status_t *(*stream_get_status_ptr)(uint8_t instance);
 
 struct io_stream_properties {
-    stream_type_t type;                                     //!< Type of stream.
-    uint8_t instance;                                       //!< Instance of stream type, starts from 0.
+    stream_type_t type;                 //!< Type of stream.
+    uint8_t instance;                   //!< Instance of stream type, starts from 0.
     io_stream_flags_t flags;
     stream_claim_ptr claim;
     stream_release_ptr release;
-    stream_get_status_ptr get_status;                       //!< Optional handler for getting stream status, for UART streams only
+    stream_get_status_ptr get_status;   //!< Optional handler for getting stream status, for UART streams only
 };
 
 typedef bool (*stream_enumerate_callback_ptr)(io_stream_properties_t const *properties, void *data);
@@ -476,6 +477,8 @@ int32_t stream_get_null (void);
 
 bool stream_mpg_register (const io_stream_t *stream, bool rx_only, stream_write_char_ptr write_char);
 
+bool stream_mpg_set_baud (uint8_t baud);
+
 /*! \brief Function for enabling/disabling input from a secondary input stream.
 \param on \a true if switching input to mpg stream, \a false when restoring original input.
 \returns \a true when succsessful, \a false otherwise.
@@ -504,6 +507,8 @@ void stream_disconnect (const io_stream_t *stream);
 
 bool stream_connected (void);
 
+bool stream_is_busy (bool is_connected);
+
 bool stream_await_tx_clear (const io_stream_t *stream);
 
 void stream_set_defaults (const io_stream_t *stream, uint32_t baud_rate);
@@ -521,6 +526,9 @@ void stream_usb_linestate_changed (uint8_t instance, serial_linestate_t state);
 io_stream_t const *stream_open_instance (uint8_t instance, uint32_t baud_rate, stream_write_char_ptr rx_handler, const char *description);
 bool stream_close (io_stream_t const *stream);
 bool stream_set_description (const io_stream_t *stream, const char *description);
+
+void stream_set_file (vfs_file_t *file, stream_read_ptr read);
+bool stream_is_file (void);
 
 void debug_printf(const char *fmt, ...);
 

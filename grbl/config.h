@@ -116,10 +116,9 @@ generate a solution.
 #define SPINDLE_NPWM_PIECES 4 // Number of pieces for spindle RPM linearization, max 4.
 #endif
 
-#include "nuts_bolts.h"
+// --- Kinematics options ---
 
 //#define KINEMATICS_API // Uncomment to add HAL entry points for custom kinematics
-
 
 /*! \def WALL_PLOTTER
 \brief Enable wall plotter kinematics.
@@ -150,6 +149,14 @@ Experimental - testing required and homing needs to be worked out.
 #define POLAR_ROBOT Off
 #endif
 
+/*! \def RTCP_AC
+\brief Enable RTCP AC kinematics.
+Experimental - verification required. Needs XYZAC axes configured.
+*/
+#if !defined RTCP_AC || defined __DOXYGEN__
+#define RTCP_AC Off
+#endif
+
 /*! \def COREXY
 \brief Enable CoreXY kinematics. Use ONLY with CoreXY machines.
 <br>__IMPORTANT:__ If homing is enabled, you must reconfigure the homing cycle \#defines above to
@@ -174,6 +181,10 @@ have the same steps per mm internally.
 <br> To be used when the screw pitch is not equal. The highest numbered axis is claimed for the second motor.
 */
 //#define ASYMMETRIC_AUTO_SQUARE Y_AXIS	// Uncomment to enable
+
+// --- End of kinematics ---
+
+#include "nuts_bolts.h"
 
 /*! \def CHECK_MODE_DELAY
 \brief
@@ -210,6 +221,10 @@ or EMI triggering the related interrupt falsely or too many times.
 
 #if !defined ENABLE_JERK_ACCELERATION || defined __DOXYGEN__
 #define ENABLE_JERK_ACCELERATION Off // Enable to use 3rd order acceleration calculations. May need more processing power, a FPU will help.
+#endif
+
+#if !defined CUTTER_COMP_ENABLE || defined __DOXYGEN__
+#define CUTTER_COMP_ENABLE Off
 #endif
 
 // -
@@ -2071,6 +2086,15 @@ For the controller the distance is unitless and and can be in degrees, radians, 
 #endif
 ///@}
 
+/*! @name $701 - Setting_RotaryOptions
+When enabled feed rate for combined rotary and linear motion is converted to inverse time mode..
+*/
+///@{
+#if !defined DEFAULT_ROTARY_FIX_ENABLE || defined __DOXYGEN__
+#define DEFAULT_ROTARY_FIX_ENABLE Off
+#endif
+///@}
+
 /*! @name $680 - Setting_StepperEnableDelay
 Allowed range 0 - 250 milliseconds. Driver adds ~2 milliseconds.
 */
@@ -2231,6 +2255,16 @@ Adds directory entries in $F and $F+ output to allow hierarchical navigation of 
 */
 #if !defined DEFAULT_FS_HIERACHICAL_LISTING || defined __DOXYGEN__
 #define DEFAULT_FS_HIERACHICAL_LISTING Off // Default disabled. Set to \ref On or 1 to enable.
+#endif
+///@}
+
+/*! @name $720 - Settings_MPG_BaudRate
+Default baud rate for MPG stream.
+__NOTE:__ keep $720 options and stream_mpg_set_baud() in sync.
+*/
+///@{
+#if !defined DEFAULT_MPG_BAUD || defined __DOXYGEN__
+#define DEFAULT_MPG_BAUD 1 // 0 = 38400, 1 = 115200, 2 = 230400, 3 = 460800, 4 = 576000, 5 = 921600
 #endif
 ///@}
 

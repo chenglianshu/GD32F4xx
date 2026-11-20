@@ -46,7 +46,7 @@
 #endif
 
 static char buf[(STRLEN_COORDVALUE + 1) * N_AXIS];
-static char *(*get_axis_values)(float *axis_values);
+static char *(*get_axis_values)(float *axis_values, bool position);
 static char *(*get_axis_value)(float value);
 static char *(*get_rate_value)(float value);
 static const char vbar[2] = { '|', '\0' };
@@ -74,14 +74,14 @@ static char *appendbuf (int argc, ...)
 }
 
 // Convert axis position values to null terminated string (mm).
-static char *get_axis_values_mm (float *axis_values)
+static char *get_axis_values_metric (float *axis_values, bool position)
 {
     uint_fast32_t idx;
 
     buf[0] = '\0';
 
     for (idx = 0; idx < system_n_axis(); idx++) {
-        if(idx == X_AXIS && gc_state.modal.diameter_mode)
+        if(idx == X_AXIS && position && gc_state.modal.diameter_mode)
             strcat(buf, ftoa(axis_values[idx] * 2.0f, N_DECIMAL_COORDVALUE_MM));
         else
             strcat(buf, ftoa(axis_values[idx], N_DECIMAL_COORDVALUE_MM));
@@ -93,14 +93,14 @@ static char *get_axis_values_mm (float *axis_values)
 }
 
 // Convert axis position values to null terminated string (inch).
-static char *get_axis_values_inches (float *axis_values)
+static char *get_axis_values_imperial (float *axis_values, bool position)
 {
     uint_fast32_t idx;
 
     buf[0] = '\0';
 
     for (idx = 0; idx < system_n_axis(); idx++) {
-        if(idx == X_AXIS && gc_state.modal.diameter_mode)
+        if(idx == X_AXIS && position && gc_state.modal.diameter_mode)
             strcat(buf, ftoa(axis_values[idx] * INCH_PER_MM * 2.0f, N_DECIMAL_COORDVALUE_INCH));
 #if N_AXIS > 3
         else if(idx > Z_AXIS && bit_istrue(settings.steppers.is_rotary.mask, bit(idx)))
@@ -116,25 +116,25 @@ static char *get_axis_values_inches (float *axis_values)
 }
 
 // Convert rate value to null terminated string (mm).
-static char *get_axis_value_mm (float value)
+static char *get_axis_value_metric (float value)
 {
     return strcpy(buf, ftoa(value, N_DECIMAL_COORDVALUE_MM));
 }
 
 // Convert rate value to null terminated string (mm).
-static char *get_axis_value_inches (float value)
+static char *get_axis_value_imperial (float value)
 {
     return strcpy(buf, ftoa(value * INCH_PER_MM, N_DECIMAL_COORDVALUE_INCH));
 }
 
 // Convert rate value to null terminated string (mm).
-static char *get_rate_value_mm (float value)
+static char *get_rate_value_metric (float value)
 {
     return uitoa((uint32_t)value);
 }
 
 // Convert rate value to null terminated string (mm).
-static char *get_rate_value_inch (float value)
+static char *get_rate_value_imperial (float value)
 {
     return uitoa((uint32_t)(value * INCH_PER_MM));
 }
@@ -199,9 +199,9 @@ inline static char *control_signals_tostring (char *buf, control_signals_t signa
 
 FLASHMEM void report_init (void)
 {
-    get_axis_value = settings.flags.report_inches ? get_axis_value_inches : get_axis_value_mm;
-    get_axis_values = settings.flags.report_inches ? get_axis_values_inches : get_axis_values_mm;
-    get_rate_value = settings.flags.report_inches ? get_rate_value_inch : get_rate_value_mm;
+    get_axis_value = settings.flags.report_inches ? get_axis_value_imperial : get_axis_value_metric;
+    get_axis_values = settings.flags.report_inches ? get_axis_values_imperial : get_axis_values_metric;
+    get_rate_value = settings.flags.report_inches ? get_rate_value_imperial : get_rate_value_metric;
 }
 
 // Handles the primary confirmation protocol response for streaming interfaces and human-feedback.
@@ -460,9 +460,29 @@ static inline bool is_hidden (const setting_detail_t *setting)
     return (setting->id == Setting_HomingFeedRate || setting->id == Setting_HomingSeekRate) ? settings.homing.flags.per_axis_feedrates : setting->flags.hidden;
 }
 
+FLASHMEM static bool _is_setting_available (const setting_detail_t *setting, uint_fast16_t offset, void *data)
+{
+    *((bool *)data) = true;
+
+    return false;
+}
+
+FLASHMEM static bool is_setting_available (const setting_detail_t *setting)
+{
+    bool ok;
+
+    if(!(ok = setting->is_available == NULL)) {
+        if(setting->flags.increment)
+            settings_iterator(setting, _is_setting_available, &ok);
+        else
+            ok = setting->is_available(setting, 0);
+    }
+
+    return ok;
+}
+
 FLASHMEM void report_grbl_settings (bool all, void *data)
 {
-
     uint_fast16_t idx, n_settings = 0;
     const setting_detail_t *setting;
     setting_detail_t **all_settings, **psetting;
@@ -481,8 +501,9 @@ FLASHMEM void report_grbl_settings (bool all, void *data)
         // Report core settings
         for(idx = 0; idx < details->n_settings; idx++) {
             setting = &details->settings[idx];
-            if(!is_hidden(setting) && (all || setting->type == Setting_IsLegacy || setting->type == Setting_IsLegacyFn) &&
-                  (setting->is_available == NULL ||setting->is_available(setting, 0))) {
+            if(!is_hidden(setting) &&
+                 (all || setting->type == Setting_IsLegacy || setting->type == Setting_IsLegacyFn) &&
+                   is_setting_available(setting)) {
                 *psetting++ = (setting_detail_t *)setting;
                 n_settings++;
             }
@@ -492,7 +513,7 @@ FLASHMEM void report_grbl_settings (bool all, void *data)
         if(all && (details = details->next)) do {
             for(idx = 0; idx < details->n_settings; idx++) {
                 setting = &details->settings[idx];
-                if(!setting->flags.hidden && (setting->is_available == NULL || setting->is_available(setting, 0))) {
+                if(!setting->flags.hidden && is_setting_available(setting)) {
                     *psetting++ = (setting_detail_t *)setting;
                     n_settings++;
                 }
@@ -507,7 +528,7 @@ FLASHMEM void report_grbl_settings (bool all, void *data)
         free(all_settings);
 
     } else do {
-        for(idx = 0; idx < n_settings; idx++)
+        for(idx = 0; idx < details->n_settings; idx++)
             settings_iterator(&details->settings[idx], print_setting, data);
     } while((details = details->next));
 }
@@ -522,7 +543,7 @@ FLASHMEM void report_probe_parameters (void)
     float print_position[N_AXIS];
     system_convert_array_steps_to_mpos(print_position, sys.probe_position);
     hal.stream.write("[PRB:");
-    hal.stream.write(get_axis_values(print_position));
+    hal.stream.write(get_axis_values(print_position, true));
     hal.stream.write(sys.flags.probe_succeeded ? ":1" : ":0");
     hal.stream.write("]" ASCII_EOL);
 }
@@ -532,7 +553,7 @@ FLASHMEM void report_probe_parameters (void)
 FLASHMEM void report_home_position (void)
 {
     hal.stream.write("[HOME:");
-    hal.stream.write(get_axis_values(sys.home_position));
+    hal.stream.write(get_axis_values(sys.home_position, true)); // TODO: -> false?
     hal.stream.write(":");
     hal.stream.write(uitoa(sys.homed.mask));
     hal.stream.write("]" ASCII_EOL);
@@ -545,7 +566,7 @@ FLASHMEM void report_tool_offsets (void)
 #if TOOL_LENGTH_OFFSET_AXIS >= 0
     hal.stream.write(get_axis_value(gc_state.modal.tool_length_offset[TOOL_LENGTH_OFFSET_AXIS]));
 #else
-    hal.stream.write(get_axis_values(gc_state.modal.tool_length_offset));
+    hal.stream.write(get_axis_values(gc_state.modal.tool_length_offset, true)); // TODO: -> false?
 #endif
     hal.stream.write("]" ASCII_EOL);
 }
@@ -596,7 +617,7 @@ FLASHMEM void report_ngc_parameters (void)
 
     if(gc_state.modal.scaling_active) {
         hal.stream.write("[G51:");
-        hal.stream.write(get_axis_values(gc_get_scaling()));
+        hal.stream.write(get_axis_values_metric(gc_get_scaling(), false));
         hal.stream.write("]" ASCII_EOL);
     }
 
@@ -629,7 +650,7 @@ FLASHMEM void report_ngc_parameters (void)
 
         if(idx != CoordinateSystem_G92) {
             hal.stream.write(":");
-            hal.stream.write(get_axis_values(offset.coord.values));
+            hal.stream.write(get_axis_values(offset.coord.values, true));
 #ifdef ROTATION_ENABLE
             if(idx < N_WorkCoordinateSystems) {
                 hal.stream.write(":");
@@ -642,7 +663,7 @@ FLASHMEM void report_ngc_parameters (void)
 
     // Print G92, G92.1 which are not persistent in memory
     hal.stream.write("92:");
-    hal.stream.write(get_axis_values(gc_state.g92_offset.coord.values));
+    hal.stream.write(get_axis_values(gc_state.g92_offset.coord.values, true));
     hal.stream.write("]" ASCII_EOL);
 
     tool_data_t *tool_data;
@@ -654,7 +675,7 @@ FLASHMEM void report_ngc_parameters (void)
             hal.stream.write("[T:");
             hal.stream.write(uitoa(tool_data->tool_id));
             hal.stream.write("|");
-            hal.stream.write(get_axis_values(tool_data->offset.values));
+            hal.stream.write(get_axis_values(tool_data->offset.values, true));
             hal.stream.write("|");
             hal.stream.write(get_axis_value(tool_data->radius));
             hal.stream.write("|6,0,0|");
@@ -676,11 +697,29 @@ FLASHMEM void report_ngc_parameters (void)
 
     report_tool_offsets();              // Print tool length offset value.
     report_probe_parameters();          // Print probe parameters. Not persistent in memory.
-    if(sys.tlo_reference_set.mask) {    // Print tool length reference offset. Not persistent in memory.
-        plane_t plane;
-        gc_get_plane_data(&plane, gc_state.modal.plane_select);
+    if(sys.tlo_reference_set.mask) {    // Print tool length reference offset and position. Not persistent in memory.
+
+        point_2d_t refpos;
+        uint_fast8_t n, tlr_axis = ffs(sys.tlo_reference_set.mask) - 1;
+
         hal.stream.write("[TLR:");
-        hal.stream.write(get_axis_value(sys.tlo_reference[plane.axis_linear] / settings.axis[plane.axis_linear].steps_per_mm));
+        hal.stream.write(get_axis_value(sys.tlo_reference[tlr_axis] / settings.axis[tlr_axis].steps_per_mm));
+        hal.stream.write("]" ASCII_EOL);
+
+        hal.stream.write("[TLR@:");
+        for(idx = 0, n = 0; idx <= Z_AXIS; idx++) {
+            if(idx != tlr_axis) {
+                if(n)
+                    hal.stream.write(",");
+                hal.stream.write(get_axis_value((refpos.values[n++] = (sys.tlo_reference[idx] / settings.axis[idx].steps_per_mm))));
+            }
+        }
+        hal.stream.write(appendbuf(2, ":", uitoa(tlr_axis)));
+#if COMPATIBILITY_LEVEL <= 1
+        hal.stream.write(appendbuf(2, ":", uitoa(system_pos_at_fixture(refpos, tlr_axis, CoordinateSystem_G59_3, TOOLSETTER_RADIUS))));
+#else
+        hal.stream.write(":0");
+#endif
         hal.stream.write("]" ASCII_EOL);
     }
 
@@ -706,14 +745,13 @@ FLASHMEM static char *motionmode_to_str (char *buf, motion_mode_t mode)
 {
     strcpy(buf, "G");
 
-    if(mode == MotionMode_QuadraticSpline || mode == MotionMode_RigidTapping) {
-        strcat(buf, uitoa(mode / 10));
-        strcat(buf, ".1");
-    } else if(mode >= MotionMode_ProbeToward) {
-        strcat(buf, "38.");
-        strcat(buf, uitoa((uint32_t)(mode - (MotionMode_ProbeToward - 2))));
-    } else
-        strcat(buf, uitoa((uint32_t)mode));
+    uint_fast8_t submode = mode % 10;
+
+    strcat(buf, uitoa((mode - submode) / 10));
+    if(submode) {
+        strcat(buf, ".");
+        strcat(buf, uitoa(submode));
+    }
 
     return buf;
 }
@@ -722,7 +760,7 @@ FLASHMEM static char *motionmode_to_str (char *buf, motion_mode_t mode)
 FLASHMEM void report_gcode_modes (stream_write_ptr stream_write)
 {
     stream_write("[GC:");
-    stream_write(motionmode_to_str(buf, gc_state.modal.motion));
+    stream_write(motionmode_to_str(buf, st_get_motion_mode()));
     stream_write(" ");
     stream_write(gc_coord_system_to_str(gc_state.modal.g5x_offset.id));
 
@@ -753,6 +791,15 @@ FLASHMEM void report_gcode_modes (stream_write_ptr stream_write)
 
     if(settings.mode == Mode_Lathe && gc_spindle_get(0)->hal->cap.variable)
         stream_write(gc_spindle_get(0)->rpm_mode == SpindleSpeedMode_RPM ? " G97" : " G96");
+
+#if CUTTER_COMP_ENABLE
+    stream_write(" G");
+    stream_write(uitoa(40 + gc_state.modal.cutter_comp.side));
+    if(gc_state.modal.cutter_comp.side && gc_state.modal.cutter_comp.dynamic)
+        stream_write(".1");
+#else
+    stream_write(" G40");
+#endif
 
 #if COMPATIBILITY_LEVEL < 10
 
@@ -986,6 +1033,9 @@ FLASHMEM void report_build_info (char *line, bool extended)
         strcpy(buf, "[NEWOPT:ENUMS,RT");
         strcat(buf, settings.flags.legacy_rt_commands ? "+," : "-,");
 
+#if CUTTER_COMP_ENABLE
+        strcat(buf, "CCMP,");
+#endif
         if(settings.homing.flags.enabled)
             strcat(buf, "HOME,");
 
@@ -1000,6 +1050,11 @@ FLASHMEM void report_build_info (char *line, bool extended)
             if(hal.signals_cap.probe_disconnected)
                 strcat(buf, "PC,");
         }
+
+#if N_AXIS > 3
+        if(settings.flags.rotary_fix_enable)
+            strcat(buf, "RF,");
+#endif
 
         if(hal.signals_cap.stop_disable)
             strcat(buf, "OS,");
@@ -1026,9 +1081,9 @@ FLASHMEM void report_build_info (char *line, bool extended)
         if(hal.reboot)
             strcat(buf, "REBOOT,");
 
-    #if NGC_EXPRESSIONS_ENABLE
+#if NGC_EXPRESSIONS_ENABLE
         strcat(buf, "EXPR,");
-    #endif
+#endif
 
         if(atc != ATC_None || (settings.tool_change.mode != ToolChange_Ignore && !!hal.stream.suspend_read))
             strcat(buf, atc == ATC_None ? "TC," : (atc == ATC_Online ? "ATC=1," : "ATC=0,")); // Tool change supported (M6)
@@ -1044,9 +1099,9 @@ FLASHMEM void report_build_info (char *line, bool extended)
         if(canbus_enabled())
             strcat(buf, "CAN,");
 
-    #ifdef PID_LOG
+#ifdef PID_LOG
         strcat(buf, "PID,");
-    #endif
+#endif
 
         append = &buf[strlen(buf) - 1];
         if(*append == ',')
@@ -1283,7 +1338,7 @@ void report_realtime_status (stream_write_ptr stream_write, status_report_tracki
 
     // Report position
     stream_write(settings.status_report.machine_position ? "|MPos:" : "|WPos:");
-    stream_write(get_axis_values(print_position));
+    stream_write(get_axis_values(print_position, true));
 
     // Returns planner and output stream buffer states.
 
@@ -1305,7 +1360,7 @@ void report_realtime_status (stream_write_ptr stream_write, status_report_tracki
     if(report->flags.distance_to_go) {
         // Report distance-to-go.
         stream_write("|DTG:");
-        stream_write(get_axis_values(dist_remaining));
+        stream_write(get_axis_values(dist_remaining, true));
     }   
 
     spindle_ptrs_t *spindle_0;
@@ -1386,6 +1441,28 @@ void report_realtime_status (stream_write_ptr stream_write, status_report_tracki
             if(ctrl_pin_state.value)
                 append = control_signals_tostring(append, ctrl_pin_state);
 
+            if(report->flags.all || (report->flags.extended && report->probe_states.aquired)) {
+
+                probe_states_t probe_states = probes_get_state();
+
+                if(report->flags.all ? probe_states.aquired : probe_states.flags != report->probe_states.flags) {
+                    if(probe_states.probe_triggered)
+                        *append++ = 'I';
+                    else if(report->flags.extended && probe_states.probe_triggered != report->probe_states.probe_triggered)
+                        *append++ = 'i';
+                    if(probe_states.toolsetter_triggered)
+                        *append++ = 'J';
+                    else if(report->flags.extended && probe_states.toolsetter_triggered != report->probe_states.toolsetter_triggered)
+                        *append++ = 'j';
+                    if(probe_states.probe2_triggered)
+                        *append++ = 'K';
+                    else if(report->flags.extended && probe_states.probe2_triggered != report->probe_states.probe2_triggered)
+                        *append++ = 'k';
+                }
+
+                report->probe_states.flags = probe_states.flags;
+            }
+
             *append = '\0';
             stream_write(buf);
         }
@@ -1437,7 +1514,7 @@ void report_realtime_status (stream_write_ptr stream_write, status_report_tracki
                     wco[idx] = gc_get_offset(idx, true);
             }
             stream_write("|WCO:");
-            stream_write(get_axis_values(wco));
+            stream_write(get_axis_values(wco, true));
 #ifdef ROTATION_ENABLE
 //            stream_write(":");
 //            stream_write(ftoa(gc_state.modal.g5x_offset.data.rotation, 2));
@@ -1548,16 +1625,19 @@ void report_realtime_status (stream_write_ptr stream_write, status_report_tracki
         static tool_id_t tool_id;
         static float feed_rate, spindle_rpm;
         static gc_modal_t last_state;
+        static motion_mode_t motion_mode;
         static bool g92_active;
 #if NGC_PARAMETERS_ENABLE
         static bool g66_active;
 #endif
 
         spindle_t *spindle = gc_spindle_get(0);
+        motion_mode_t new_mode = st_get_motion_mode();
 
         gcode_mode_changed = feed_rate != gc_state.feed_rate ||
                               spindle_rpm != spindle->rpm ||
-                               tool_id != gc_state.tool->tool_id
+                               tool_id != gc_state.tool->tool_id ||
+                                motion_mode != new_mode
 #if NGC_PARAMETERS_ENABLE
                                 || g66_active != !!gc_state.g66_args;
 #else
@@ -1568,6 +1648,7 @@ void report_realtime_status (stream_write_ptr stream_write, status_report_tracki
             feed_rate = gc_state.feed_rate;
             tool_id = gc_state.tool->tool_id;
             spindle_rpm = spindle->rpm;
+            motion_mode = new_mode;
 #if NGC_PARAMETERS_ENABLE
             g66_active = !!gc_state.g66_args;
 #endif
@@ -1936,7 +2017,7 @@ FLASHMEM static bool print_sorted (const setting_detail_t *setting, uint_fast16_
 FLASHMEM static bool print_unsorted (const setting_detail_t *setting, uint_fast16_t offset, void *args)
 {
     if(!(((report_args_t *)args)->group == setting->group && ((report_args_t *)args)->offset != offset) &&
-       (setting->is_available == NULL ||setting->is_available(setting, 0)))
+       (setting->is_available == NULL ||setting->is_available(setting, offset)))
         report_settings_detail(((report_args_t *)args)->format, setting, offset);
 
     return true;
@@ -1973,7 +2054,7 @@ FLASHMEM static status_code_t print_settings_details (settings_format_t format, 
         do {
             for(idx = 0; idx < details->n_settings; idx++) {
                 setting = &details->settings[idx];
-                if(!is_hidden(setting) && (group == Group_All || setting->group == args.group) && (setting->is_available == NULL || setting->is_available(setting, 0))) {
+                if(!is_hidden(setting) && (group == Group_All || setting->group == args.group) && is_setting_available(setting)) {
                     *psetting++ = (setting_detail_t *)setting;
                     n_settings++;
                 }

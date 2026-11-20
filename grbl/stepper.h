@@ -49,11 +49,14 @@ typedef struct st_block {
     struct st_block *next;            //!< Pointer to next element in cirular list of blocks
     steps_t steps;
     uint32_t step_event_count;
+#if PLANNER_ADD_MOTION_MODE
+    motion_mode_t motion_mode;
+#endif
     float steps_per_mm;
     float millimeters;
     float programmed_rate;
     char *message;                     //!< Message to be displayed when block is executed
-    output_command_t *output_commands; //!< Output commands (linked list) to be performed when block is executed
+    volatile output_command_t *output_commands; //!< Output commands (linked list) to be performed when block is executed
     axes_signals_t direction;
     gc_override_flags_t overrides;     //!< Block bitfield variable for overrides
     bool backlash_motion;
@@ -93,6 +96,7 @@ typedef struct stepper {
     steps_t counter;                //!< Counter variables for the Bresenham line tracer.
 //    uint_fast16_t spindle_pwm;
     st_block_t *exec_block;         //!< Pointer to the block data for the segment being executed.
+    st_block_t *resume_block;       //!< Block that was executing when the segment buffer last ran empty.
     segment_t *exec_segment;        //!< Pointer to the segment being executed.
 } stepper_t;
 
@@ -157,5 +161,6 @@ void stepper_driver_interrupt_handler (void);
 
 offset_id_t st_get_offset_id (void);
 axes_signals_t st_get_enable_out (void);
+motion_mode_t st_get_motion_mode (void);
 
 #endif

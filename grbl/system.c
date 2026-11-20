@@ -30,7 +30,7 @@
 #include "state_machine.h"
 #include "machine_limits.h"
 #ifdef KINEMATICS_API
-#include "kinematics.h"
+#include "kinematics/interface.h"
 #endif
 
 static uint8_t n_axis = N_AXIS;
@@ -115,7 +115,7 @@ ISR_CODE void ISR_FUNC(control_interrupt_handler)(control_signals_t signals)
         } else {
 #ifndef NO_SAFETY_DOOR_SUPPORT
             if(signals.safety_door_ajar && hal.signals_cap.safety_door_ajar && !gc_state.tool_change) {
-            	sys.flags.is_parking = false;
+                sys.flags.is_parking = false;
                 if(settings.safety_door.flags.ignore_when_idle) {
                     // Only stop the spindle (laser off) when idle or jogging,
                     // this to allow positioning the controlled point (spindle) when door is open.
@@ -583,22 +583,18 @@ FLASHMEM static status_code_t enter_sleep (sys_state_t state, char *args)
 
 FLASHMEM static status_code_t set_tool_reference (sys_state_t state, char *args)
 {
+    if(sys.flags.probe_succeeded) {
 #if TOOL_LENGTH_OFFSET_AXIS >= 0
-    if(sys.flags.probe_succeeded) {
         sys.tlo_reference_set.mask = bit(TOOL_LENGTH_OFFSET_AXIS);
-        sys.tlo_reference[TOOL_LENGTH_OFFSET_AXIS] = sys.probe_position[TOOL_LENGTH_OFFSET_AXIS]; // - gc_state.tool_length_offset[Z_AXIS]));
-    } else
-        sys.tlo_reference_set.mask = 0;
 #else
-    plane_t plane;
-    gc_get_plane_data(&plane, gc_state.modal.plane_select);
-    if(sys.flags.probe_succeeded) {
+        plane_t plane;
+        gc_get_plane_data(&plane, gc_state.modal.plane_select);
         sys.tlo_reference_set.mask |= bit(plane.axis_linear);
-        sys.tlo_reference[plane.axis_linear] = sys.probe_position[plane.axis_linear];
-//                    - lroundf(gc_state.tool_length_offset[plane.axis_linear] * settings.axis[plane.axis_linear].steps_per_mm);
+#endif
+        memcpy(sys.tlo_reference, sys.probe_position, sizeof(sys.probe_position[0]) * N_AXIS);
     } else
         sys.tlo_reference_set.mask = 0;
-#endif
+
     report_add_realtime(Report_TLOReference);
 
     return Status_OK;
@@ -639,12 +635,10 @@ FLASHMEM static status_code_t build_info (sys_state_t state, char *args)
         char info[sizeof(stored_line_t)];
         settings_read_build_info(info);
         report_build_info(info, false);
-    }
-  #if !DISABLE_BUILD_INFO_WRITE_COMMAND
-    else if (strlen(args) < (sizeof(stored_line_t) - 1))
-        settings_write_build_info(args);
-  #endif
-    else
+    } else
+ #if !DISABLE_BUILD_INFO_WRITE_COMMAND
+    if(!settings_write_build_info(args))
+ #endif
         return Status_InvalidStatement;
 
     return Status_OK;
@@ -719,6 +713,36 @@ FLASHMEM static status_code_t settings_reset (sys_state_t state, char *args)
     }
 
     return retval;
+}
+
+
+FLASHMEM static status_code_t output_to_stream (sys_command_ptr fn, sys_state_t state, char *args, stream_write_ptr write)
+{
+    stream_write_ptr out = hal.stream.write;
+    hal.stream.write = write;
+
+    status_code_t status = fn(state, args);
+
+    hal.stream.write = out;
+
+    return status;
+}
+
+FLASHMEM static status_code_t output_grbl_setting (setting_id_t id, void *data, stream_write_ptr write)
+{
+    stream_write_ptr out = NULL;
+
+    if(write != hal.stream.write) {
+        out = hal.stream.write;
+        hal.stream.write = write;
+    }
+
+    status_code_t status = report_grbl_setting(id, data);
+
+    if(out)
+        hal.stream.write = out;
+
+    return status;
 }
 
 FLASHMEM static status_code_t output_startup_lines (sys_state_t state, char *args)
@@ -941,9 +965,9 @@ FLASHMEM const char *help_reboot (const char *cmd)
 /*! \brief Command dispatch table
  */
 PROGMEM static const sys_command_t sys_commands[] = {
-    { "G", output_parser_state, { .noargs = On, .allow_blocking = On }, { .str = "output parser state" } },
+    { "G", output_parser_state, { .noargs = On, .allow_blocking = On, .allow_redirect = On }, { .str = "output parser state" } },
     { "J", jog, {}, { .str = "$J=<gcode> - jog machine" } },
-    { "#", output_ngc_parameters, { .allow_blocking = On }, {
+    { "#", output_ngc_parameters, { .allow_blocking = On, .allow_redirect = On }, {
         .str = "output offsets, tool table, probing and home position"
 #if NGC_PARAMETERS_ENABLE
      ASCII_EOL "$#=<n> - output value for parameter <n>"
@@ -961,7 +985,7 @@ PROGMEM static const sys_command_t sys_commands[] = {
     { "S", toggle_single_block, { .noargs = On, .help_fn = On }, { .fn = help_switches } },
     { "O", toggle_optional_stop, { .noargs = On, .help_fn = On }, { .fn = help_switches } },
     { "C", check_mode, { .noargs = On }, { .str = "enable check mode, <Reset> to exit" } },
-    { "X", disable_lock, {}, { .str = "unlock machine" } },
+    { "X", disable_lock, { .allow_redirect = On }, { .str = "unlock machine" } },
     { "H", home, { .help_fn = On }, { .fn = help_homing } },
     { "HX", home_x },
     { "HY", home_y },
@@ -1108,9 +1132,10 @@ __NOTE:__ Code calling this function needs to provide the command in a writable 
  spaces removed.
 
 \param line pointer to the command string.
+\param write \a stream_write_ptr pointer to the function to receive output, typically hal.stream.write.
 \returns \a status_code_t enum value; #Status_OK if successfully handled, another relevant status code if not.
 */
-FLASHMEM status_code_t system_execute_line (char *line)
+FLASHMEM status_code_t system_execute_line (char *line, stream_write_ptr write)
 {
     if(line[1] == '\0') {
         grbl.report.help_message();
@@ -1120,6 +1145,7 @@ FLASHMEM status_code_t system_execute_line (char *line)
     status_code_t retval = Status_Unhandled;
 
     char c, *s1, *s2;
+    bool base_stream = write == hal.stream.write;
 
     s1 = s2 = ++line;
 
@@ -1151,8 +1177,11 @@ FLASHMEM status_code_t system_execute_line (char *line)
                 if(sys.blocking_event && !cmd->commands[idx].flags.allow_blocking) {
                     retval = Status_NotAllowedCriticalEvent;
                     break;
+                } else if(!base_stream && !cmd->commands[idx].flags.allow_redirect) {
+                    retval = Status_AccessDenied;
+                    break;
                 } else if(!cmd->commands[idx].flags.noargs || args == NULL) {
-                    if((retval = cmd->commands[idx].execute(state_get(), args)) != Status_Unhandled)
+                    if((retval = base_stream ? cmd->commands[idx].execute(state_get(), args) : output_to_stream(cmd->commands[idx].execute, state_get(), args, write)) != Status_Unhandled)
                         break;
                 }
             }
@@ -1161,7 +1190,7 @@ FLASHMEM status_code_t system_execute_line (char *line)
     } while(cmd);
 
     // Let user code have a peek at system commands before check for global setting
-    if(retval == Status_Unhandled && grbl.on_unknown_sys_command) {
+    if(retval == Status_Unhandled && base_stream && grbl.on_unknown_sys_command) {
         if(args)
             *(--args) = '=';
 
@@ -1173,12 +1202,12 @@ FLASHMEM status_code_t system_execute_line (char *line)
 
     if(retval == Status_Unhandled) {
         // Check for global setting, store or report if so
-        if(state_get() == STATE_IDLE || (state_get() & (STATE_ALARM|STATE_ESTOP|STATE_CHECK_MODE))) {
+        if(!base_stream || state_get() == STATE_IDLE || (state_get() & (STATE_ALARM|STATE_ESTOP|STATE_CHECK_MODE))) {
             uint_fast8_t counter = 0;
             float parameter;
             if(read_float(line, &counter, &parameter) && parameter >= 0.0f && isintf(parameter))
-                retval = args ? settings_store_setting((setting_id_t)parameter, args)
-                              :  report_grbl_setting((setting_id_t)parameter, NULL);
+                retval = args ? (base_stream ? settings_store_setting((setting_id_t)parameter, args) : Status_AccessDenied)
+                              : output_grbl_setting((setting_id_t)parameter, NULL, write);
             else
                 retval = Status_InvalidStatement;
         } else
@@ -1240,7 +1269,7 @@ __NOTE:__ If motor steps and machine position are not in the same coordinate fra
 void system_convert_array_steps_to_mpos (float *position, int32_t *steps)
 {
 #ifdef KINEMATICS_API
-    kinematics.transform_steps_to_cartesian(position, steps);
+    kinematics.transform_steps_to_cartesian((coord_data_t *)position, (mpos_t *)steps);
 #else
     uint_fast8_t idx = N_AXIS;
     do {
@@ -1250,24 +1279,67 @@ void system_convert_array_steps_to_mpos (float *position, int32_t *steps)
 #endif
 }
 
-/*! \brief Checks if XY position is within coordinate system XY with given tolerance.
+/*! \brief Checks if position is within the coordinate system position with given tolerance.
+\param pos a \a point_2d_t, the position to check.
+\param skip_axis the axis index of the axis to exclude from the check, typically the linear (tool) axis.
+\param id a \a coord_system_id_t, typically #CoordinateSystem_G59_3.
+\param tolerance as the allowed radius the current position has to be within.
+\returns \a false if tolerance is 0 or position is outside the allowed radius, otherwise \a true.
+*/
+FLASHMEM bool system_pos_at_fixture (point_2d_t pos, uint8_t skip_axis, coord_system_id_t id, float tolerance)
+{
+    bool ok = false;
+    coord_system_data_t target;
+
+    if(skip_axis <= Z_AXIS && tolerance > 0.0f && settings_read_coord_data(id, &target)) {
+
+        uint_fast8_t idx = 0, n = 0;
+        do {
+            if(idx != skip_axis)
+                pos.values[n++] -= target.coord.values[idx];
+            idx++;
+        } while(n < 2);
+
+        ok = hypot_f(pos.values[0], pos.values[1]) <= tolerance;
+    }
+
+    return ok;
+}
+
+/*! \brief Checks if the current 2D position is within coordinate system with given tolerance.
+\param skip_axis the axis index of the axis to exclude from the check, typically the linear (tool) axis.
+\param id a \a coord_system_id_t, typically #CoordinateSystem_G59_3.
+\param tolerance as the allowed radius the current position has to be within.
+\returns \a false if tolerance is 0 or position is outside the allowed radius, otherwise \a true.
+*/
+FLASHMEM bool system_at_fixture (uint8_t skip_axis, coord_system_id_t id, float tolerance)
+{
+    point_2d_t pos;
+    coord_data_t mpos;
+    uint_fast8_t idx = 0, n = 0;
+
+    system_convert_array_steps_to_mpos(mpos.values, sys.position);
+
+    do {
+        if(idx != skip_axis)
+            pos.values[n++] = mpos.values[idx];
+        idx++;
+    } while(n < 2);
+
+    return system_pos_at_fixture(pos, skip_axis, id, tolerance);
+}
+
+/*! \brief Checks if the current XY position is within coordinate system XY with given tolerance.
 \param id a \a coord_system_id_t, typically #CoordinateSystem_G59_3.
 \param tolerance as the allowed radius the current position has to be within.
 \returns \a false if tolerance is 0 or position is outside the allowed radius, otherwise \a true.
 */
 FLASHMEM bool system_xy_at_fixture (coord_system_id_t id, float tolerance)
 {
-    bool ok = false;
-
     coord_data_t position;
-    coord_system_data_t target;
+    system_convert_array_steps_to_mpos(position.values, sys.position);
 
-    if(tolerance > 0.0f && settings_read_coord_data(id, &target)) {
-        system_convert_array_steps_to_mpos(position.values, sys.position);
-        ok = hypot_f(position.x - target.coord.x, position.y - target.coord.y) <= tolerance;
-    }
-
-    return ok;
+    return system_pos_at_fixture((point_2d_t){ .x = position.x, .y = position.y }, Z_AXIS, id, tolerance);
 }
 
 /*! \brief Raise and report a system alarm.

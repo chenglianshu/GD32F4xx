@@ -217,7 +217,7 @@ static void iqei_poll (void *data)
 
 static void iqei_ab_irq (uint8_t port, bool high)
 {
-    PROGMEM static const uint8_t encoder_valid_state[] = {0, 1, 1, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0, 1, 1, 0};
+    PROGMEM static const uint8_t encoder_valid_state[] = { 0, 1, 1, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0, 1, 1, 0 };
     PROGMEM static const encoder_event_t dir_changed = { .direction_changed = On, .position_changed = On };
 
     static qei_state_t state = {0};
@@ -239,13 +239,13 @@ static void iqei_ab_irq (uint8_t port, bool high)
             iqei.data.position--;
             if(iqei.vel_timeout == 0 || iqei.dir == QEI_DirCW) {
                 iqei.dir = QEI_DirCCW;
-                task_add_immediate(iqei_post_event, &dir_changed);
+                task_add_immediate(iqei_post_event, (void *)&dir_changed);
             }
         } else if(iqei.state == 0x81 || iqei.state == 0x17 || iqei.state == 0xE8 || iqei.state == 0x7E) {
             iqei.data.position++;
             if(iqei.vel_timeout == 0 || iqei.dir == QEI_DirCCW) {
                 iqei.dir = QEI_DirCW;
-                task_add_immediate(iqei_post_event, &dir_changed);
+                task_add_immediate(iqei_post_event, (void *)&dir_changed);
             }
         }
     }

@@ -85,6 +85,16 @@ bool modbus_isbusy (void)
     return busy;
 }
 
+FLASHMEM void modbus_reset (bool abort)
+{
+    uint_fast16_t idx = n_api;
+
+    if(idx) do {
+        if(modbus[--idx].reset)
+            modbus[idx].reset(abort);
+    } while(idx);
+}
+
 FLASHMEM bool modbus_enabled (void)
 {
     return n_api > 0;
@@ -155,23 +165,23 @@ static void rx_exception (uint8_t code, void *context);
 static void rx_timeout (uint8_t code, void *context);
 
 PROGMEM static const modbus_function_properties_t cmds[] = {
-    { 0, false, false },
-    { ModBus_ReadCoils, false, false },
-    { ModBus_ReadDiscreteInputs, false, false },
-    { ModBus_ReadHoldingRegisters, false, false },
-    { ModBus_ReadInputRegisters, false, false },
-    { ModBus_WriteCoil, true, true },
-    { ModBus_WriteRegister, true, true },
-    { ModBus_ReadExceptionStatus, false, true },
-    { 0, true, false }, // ModBus_Diagnostics
-    { 0, false, false },
-    { 0, false, false },
-    { 0, false, false },
-    { 0, false, false },
-    { 0, false, false },
-    { 0, false, false },
-    { ModBus_WriteCoils, true, false },
-    { ModBus_WriteRegisters, true, false }
+    { 0, false, false, false },
+    { ModBus_ReadCoils, false, false, true },
+    { ModBus_ReadDiscreteInputs, false, false, true },
+    { ModBus_ReadHoldingRegisters, false, false, false },
+    { ModBus_ReadInputRegisters, false, false, false },
+    { ModBus_WriteCoil, true, true, false },
+    { ModBus_WriteRegister, true, true, false },
+    { ModBus_ReadExceptionStatus, false, true, false },
+    { 0, true, false, false }, // ModBus_Diagnostics
+    { 0, false, false, false },
+    { 0, false, false, false },
+    { 0, false, false, false },
+    { 0, false, false, false },
+    { 0, false, false, false },
+    { 0, false, false, false },
+    { ModBus_WriteCoils, true, false, true },
+    { ModBus_WriteRegisters, true, false, false }
 };
 PROGMEM static const uint8_t max_function = (sizeof(cmds) / sizeof(modbus_function_properties_t)) - 1;
 PROGMEM static const modbus_callbacks_t callbacks = {
@@ -255,7 +265,9 @@ FLASHMEM const modbus_function_properties_t *modbus_get_function_properties (mod
 
 FLASHMEM status_code_t modbus_message (uint8_t server, modbus_function_t function, uint16_t address, uint16_t *values, uint8_t registers, modbus_callback_ptr callback)
 {
-    if(function > max_function || !cmds[function].function || registers > MODBUS_MAX_REGISTERS)
+    const modbus_function_properties_t *p;
+
+    if(!(p = modbus_get_function_properties(function)) || registers > MODBUS_MAX_REGISTERS * (p->packed ? 8 : 1))
         return Status_InvalidStatement;
 
     uint_fast8_t idx;
@@ -278,37 +290,41 @@ FLASHMEM status_code_t modbus_message (uint8_t server, modbus_function_t functio
         cmd.rx_length = 5;
     } else {
 
-        cmd.tx_length = 6 + 2 * registers;
-        cmd.rx_length = cmd.tx_length - 1;
+        if(registers == 0)
+            return Status_InvalidStatement;
 
-        if(cmds[function].is_write) {
-            if(cmds[function].single_register) {
+        if(p->is_write) {
+            if(p->single_register) {
                 cmd.tx_length = cmd.rx_length = 8;
                 for(idx = 0; idx < registers; idx++) {
                     cmd.adu[(idx << 1) + 4] = (uint8_t)(values[idx] >> 8);
                     cmd.adu[(idx << 1) + 5] = (uint8_t)(values[idx] & 0xFF);
                 }
             } else {
-                cmd.tx_length += 3; cmd.rx_length = 8;
+
+                cmd.adu[6] = (uint8_t)(p->packed ? (registers + 7) / 8 : registers * 2);
+                cmd.rx_length = 8;
+                cmd.tx_length = 9 + cmd.adu[6];
+
                 if(cmd.tx_length > MODBUS_MAX_ADU_SIZE)
                     return Status_InvalidStatement;
 
                 cmd.adu[4] = (uint8_t)(registers >> 8);
                 cmd.adu[5] = (uint8_t)(registers & 0xFF);
-                cmd.adu[6] = (uint8_t)(registers << 1);
-                for(idx = 0; idx < registers; idx++) {
+
+                if(p->packed) {
+                    for(idx = 0; idx < cmd.adu[6]; idx++)
+                        cmd.adu[idx + 7] = (uint8_t)(idx & 1 ? (values[idx >> 1] >> 8) : (values[idx >> 1] & 0xFF));
+                } else for(idx = 0; idx < registers; idx++) {
                     cmd.adu[(idx << 1) + 7] = (uint8_t)(values[idx] >> 8);
                     cmd.adu[(idx << 1) + 8] = (uint8_t)(values[idx] & 0xFF);
                 }
             }
         } else { // read
+            cmd.tx_length = 8;
+            cmd.rx_length = 5 + (uint8_t)(p->packed ? (registers + 7) / 8 : registers * 2);
             cmd.adu[4] = (uint8_t)(registers >> 8);
             cmd.adu[5] = (uint8_t)(registers & 0xFF);
-    
-            if(function == ModBus_ReadCoils || function == ModBus_ReadDiscreteInputs)
-                cmd.rx_length = 5 + ((registers + 7) / 8);  // bit-packed, ceil(n/8) bytes
-            else
-                cmd.rx_length = 5 + (registers << 1);       // 2 bytes per register
         }
     }
 

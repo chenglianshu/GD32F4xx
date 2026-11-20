@@ -96,7 +96,7 @@ typedef struct {
     const void *fs;
     size_t size;
     vfs_file_status_t status;
-    uint8_t handle __attribute__ ((aligned (4))); // first byte of file handle structure
+    void *handle __attribute__ ((aligned (sizeof(void *)))); //!< Pointer to the underlying file system handle, can also be extended to hold actual handle data. Must be last!
 } vfs_file_t;
 
 struct vfs_dir;
@@ -127,6 +127,7 @@ typedef size_t (*vfs_write_ptr)(const void *buffer, size_t size, size_t count, v
 typedef void (*vfs_close_ptr)(vfs_file_t *file);
 typedef size_t (*vfs_ftell_ptr)(vfs_file_t *file);
 typedef int (*vfs_fseek_ptr)(vfs_file_t *file, size_t offset);
+typedef int (*vfs_ftruncate_ptr)(vfs_file_t *file, size_t length);
 typedef bool (*vfs_eof_ptr)(vfs_file_t *file);
 typedef int (*vfs_rename_ptr)(const char *from, const char *to);
 typedef int (*vfs_unlink_ptr)(const char *filename);
@@ -155,6 +156,7 @@ typedef struct
     vfs_write_ptr fwrite;
     vfs_ftell_ptr ftell;
     vfs_fseek_ptr fseek;
+    vfs_ftruncate_ptr ftruncate;
     vfs_eof_ptr feof;
     vfs_rename_ptr frename;
     vfs_unlink_ptr funlink;
@@ -218,8 +220,10 @@ typedef struct {
 struct vfs_dir {
     const void *fs;
     vfs_mount_ll_entry_t *mounts;
-    uint8_t handle __attribute__ ((aligned (4))); // must be last!
+    void *handle __attribute__ ((aligned (sizeof(void *)))); //!< Pointer to the underlying file system handle, can also be extended to hold actual handle data. Must be last!
 };
+
+#define VFS_HANDLE_SIZE sizeof(((vfs_file_t *)0)->handle)
 
 extern volatile int vfs_errno;
 extern vfs_events_t vfs;
@@ -235,6 +239,7 @@ size_t vfs_write (const void *buffer, size_t size, size_t count, vfs_file_t *fil
 int vfs_puts (const char *s, vfs_file_t *file);
 size_t vfs_tell (vfs_file_t *file);
 int vfs_seek (vfs_file_t *file, size_t offset);
+int vfs_truncate (vfs_file_t *file, size_t length);
 bool vfs_eof (vfs_file_t *file);
 int vfs_rename (const char *from, const char *to);
 int vfs_unlink (const char *filename);
@@ -256,5 +261,7 @@ void vfs_drives_close (vfs_drives_t *handle);
 vfs_free_t *vfs_drive_getfree (vfs_drive_t *drive);
 int vfs_drive_format (vfs_drive_t *drive);
 vfs_drive_t *vfs_get_drive (const char *path);
+bool vfs_mount_set_mode (const char *path, vfs_st_mode_t mode);
+const char *vfs_locate_file (const char *filename);
 
 #endif // INCLUDE_VFS_H
